@@ -1,0 +1,49 @@
+{
+    "name": "@aerostack/sdk",
+    "version": "0.2.0",
+    "description": "The official Aerostack SDK for server-side Workers and client authentication.",
+    "main": "dist/index.js",
+    "module": "dist/index.mjs",
+    "types": "dist/index.d.ts",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "scripts": {
+        "build": "tsup src/index.ts --format cjs,esm --dts",
+        "dev": "tsup src/index.ts --format cjs,esm --watch --dts",
+        "lint": "eslint src/**/*.ts",
+        "prepublishOnly": "npm run build",
+        "publish:npm": "npm publish --access public"
+    },
+    "keywords": [
+        "aerostack",
+        "cloudflare",
+        "workers",
+        "auth",
+        "sdk",
+        "backend",
+        "d1",
+        "postgres",
+        "edge"
+    ],
+    "author": "Aerostack Team",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/aerostack/aerostack.git",
+        "directory": "packages/sdk"
+    },
+    "homepage": "https://docs.aerostack.ai",
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@neondatabase/serverless": "^0.9.0"
+    },
+    "devDependencies": {
+        "@cloudflare/workers-types": "^4.20240208.0",
+        "tsup": "^8.0.2",
+        "typescript": "^5.3.3"
+    }
+}
