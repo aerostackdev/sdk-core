@@ -30,6 +30,14 @@ import type {
     ChatResponse,
     EmbedOptions,
     Embedding,
+    SearchOptions,
+    IngestOptions,
+    SearchResult,
+    Product,
+    FAQ,
+    SearchContent,
+    TypeStats,
+    SearchConfigureOptions,
     GenerateOptions,
     GenerationResult,
     InvokeOptions,
@@ -463,12 +471,13 @@ export class AerostackServer {
      * AI operations using Cloudflare AI
      */
     get ai() {
+        const self = this;
         return {
             /**
              * Generate chat completion
              */
             chat: async (messages: Message[], options?: ChatOptions): Promise<ChatResponse> => {
-                if (!this._ai) {
+                if (!self._ai) {
                     throw new AIError(
                         ErrorCode.AI_NOT_CONFIGURED,
                         'AI binding not configured',
@@ -481,7 +490,7 @@ export class AerostackServer {
                 try {
                     const model = options?.model || '@cf/meta/llama-3-8b-instruct';
                     // @ts-ignore - Workers AI types are complex
-                    const result: any = await this._ai.run(model as any, {
+                    const result: any = await self._ai.run(model as any, {
                         messages,
                         temperature: options?.temperature,
                         max_tokens: options?.maxTokens,
@@ -509,7 +518,7 @@ export class AerostackServer {
              * Generate text embeddings
              */
             embed: async (text: string, options?: EmbedOptions): Promise<Embedding> => {
-                if (!this._ai) {
+                if (!self._ai) {
                     throw new AIError(
                         ErrorCode.AI_NOT_CONFIGURED,
                         'AI binding not configured',
@@ -522,7 +531,7 @@ export class AerostackServer {
                 try {
                     const model = options?.model || '@cf/baai/bge-base-en-v1.5';
                     // @ts-ignore - Workers AI types are complex
-                    const result: any = await this._ai.run(model as any, { text });
+                    const result: any = await self._ai.run(model as any, { text });
 
                     return {
                         embedding: (result as any).data[0],
@@ -545,7 +554,7 @@ export class AerostackServer {
              * Generate text from prompt
              */
             generate: async (prompt: string, options?: GenerateOptions): Promise<GenerationResult> => {
-                if (!this._ai) {
+                if (!self._ai) {
                     throw new AIError(
                         ErrorCode.AI_NOT_CONFIGURED,
                         'AI binding not configured',
@@ -558,7 +567,7 @@ export class AerostackServer {
                 try {
                     const model = options?.model || '@cf/meta/llama-3-8b-instruct';
                     // @ts-ignore - Workers AI types are complex
-                    const result: any = await this._ai.run(model as any, {
+                    const result: any = await self._ai.run(model as any, {
                         prompt,
                         temperature: options?.temperature,
                         max_tokens: options?.maxTokens,
@@ -580,6 +589,171 @@ export class AerostackServer {
                     );
                 }
             },
+
+            /**
+             * Managed Vector Search operations
+             */
+            get search() {
+                return {
+                    /**
+                     * Ingest content into managed search index
+                     */
+                    ingest: async (content: string, options: IngestOptions): Promise<void> => {
+                        const { id = crypto.randomUUID(), type, metadata = {} } = options;
+
+                        // 1. Get embedding
+                        const embedding = await self.ai.embed(content);
+
+                        // 2. Storage and Vectorize update via internal API or direct bindings
+                        // For standalone SDK, we assume user might handle storage or we provide a default managed path
+                        // However, to keep it "managed", we should ideally route this to Aerostack API 
+                        // IF the SDK is initialized with an apiKey.
+
+                        // IF we have direct bindings, we can do it directly
+                        const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
+                        if (vectorize) {
+                            await vectorize.upsert([{
+                                id,
+                                values: embedding.embedding,
+                                metadata: {
+                                    ...metadata,
+                                    type,
+                                    text: content.slice(0, 1000)
+                                }
+                            }]);
+                            return;
+                        }
+
+                        // Fallback: Use service invocation if available
+                        await self.services.invoke('internal.ai.search.ingest', { content, options });
+                    },
+
+                    /**
+                     * Search managed index
+                     */
+                    query: async (text: string, options?: SearchOptions): Promise<SearchResult[]> => {
+                        const topK = options?.topK || 5;
+
+                        // 1. Get embedding
+                        const embedding = await self.ai.embed(text);
+
+                        const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
+                        if (vectorize) {
+                            const queryOptions: any = { topK, returnMetadata: true };
+                            if (options?.types) {
+                                queryOptions.filter = { type: { $in: options.types } };
+                            }
+                            if (options?.filter) {
+                                queryOptions.filter = { ...queryOptions.filter, ...options.filter };
+                            }
+
+                            const results = await vectorize.query(embedding.embedding, queryOptions);
+                            return results.matches.map(m => ({
+                                id: m.id,
+                                content: (m.metadata?.text as string) || '',
+                                score: m.score,
+                                type: (m.metadata?.type as string) || 'unknown',
+                                metadata: m.metadata || {}
+                            }));
+                        }
+
+                        return self.services.invoke('internal.ai.search.query', { text, options });
+                    },
+
+                    /**
+                     * Delete item by ID
+                     */
+                    delete: async (id: string): Promise<void> => {
+                        const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
+                        if (vectorize) {
+                            await vectorize.deleteByIds([id]);
+                            return;
+                        }
+                        await self.services.invoke('internal.ai.search.delete', { id });
+                    },
+
+                    /**
+                     * Delete all items of a certain type
+                     */
+                    deleteByType: async (type: string): Promise<void> => {
+                        // Vectorize doesn't support delete by filter directly in all versions, 
+                        // so we might need to route this to the API which has a DB backup
+                        await self.services.invoke('internal.ai.search.deleteByType', { type });
+                    },
+
+                    /**
+                     * Configure search settings
+                     */
+                    configure: async (options: SearchConfigureOptions): Promise<void> => {
+                        await self.services.invoke('internal.ai.search.configure', options);
+                    },
+
+                    /**
+                     * Pre-built pattern helpers
+                     */
+                    get helpers() {
+                        return {
+                            /**
+                             * Product Recommendation helpers
+                             */
+                            products: {
+                                ingest: async (product: Product): Promise<void> => {
+                                    const { id, name, description, ...rest } = product;
+                                    await self.ai.search.ingest(`${name}\n${description}`, {
+                                        id,
+                                        type: 'product',
+                                        metadata: rest
+                                    });
+                                },
+                                search: async (query: string, options?: SearchOptions): Promise<SearchResult[]> => {
+                                    return self.ai.search.query(query, {
+                                        ...options,
+                                        types: ['product']
+                                    });
+                                }
+                            },
+                            /**
+                             * FAQ / Knowledge base helpers
+                             */
+                            faq: {
+                                ingest: async (faq: FAQ): Promise<void> => {
+                                    const { id, question, answer, ...rest } = faq;
+                                    await self.ai.search.ingest(`Q: ${question}\nA: ${answer}`, {
+                                        id,
+                                        type: 'faq',
+                                        metadata: rest
+                                    });
+                                },
+                                search: async (query: string, options?: SearchOptions): Promise<SearchResult[]> => {
+                                    return self.ai.search.query(query, {
+                                        ...options,
+                                        types: ['faq']
+                                    });
+                                }
+                            },
+                            /**
+                             * Content / Article helpers
+                             */
+                            content: {
+                                ingest: async (content: SearchContent): Promise<void> => {
+                                    const { id, title, body, ...rest } = content;
+                                    await self.ai.search.ingest(`${title}\n${body}`, {
+                                        id,
+                                        type: 'content',
+                                        metadata: rest
+                                    });
+                                },
+                                search: async (query: string, options?: SearchOptions): Promise<SearchResult[]> => {
+                                    return self.ai.search.query(query, {
+                                        ...options,
+                                        types: ['content']
+                                    });
+                                }
+                            }
+                        };
+                    }
+                };
+            }
         };
     }
 

@@ -1,8 +1,21 @@
 import { ClientError, ClientErrorCode, AuthenticationError, ValidationError, NetworkError } from './client-errors';
+import { RealtimeClient, RealtimeEvent, RealtimeCallback } from './realtime';
 
 export interface SDKConfig {
     projectSlug: string;
     baseUrl?: string;
+    apiKey?: string;
+}
+
+/**
+ * Placeholder for generated project types.
+ * Use `aerostack generate types` to populate this.
+ */
+export interface DefaultProjectSchema {
+    collections: Record<string, any>;
+    customApis: Record<string, { params: any; response: any }>;
+    queues: Record<string, any>;
+    cache: Record<string, any>;
 }
 
 export interface AuthResponse {
@@ -61,20 +74,21 @@ export interface ProfileUpdate {
 /**
  * Aerostack Client SDK
  * 
- * Provides client-side authentication and (future) ecommerce features
- * Focused on:
- * - Complete authentication flows
- * - Password reset
- * - Session management
- * - User profile management
+ * Provides client-side authentication, database access, and 
+ * custom logic invocation with full type-safety.
  */
-export class AerostackClient {
+export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSchema> {
     private projectSlug: string;
     private baseUrl: string;
+    private apiKey?: string;
+    private _realtime: RealtimeClient | null = null;
+    private _token?: string;
+    private _userId?: string;
 
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
         this.baseUrl = config.baseUrl || 'https://api.aerostack.app';
+        this.apiKey = config.apiKey;
     }
 
     /**
@@ -227,31 +241,150 @@ export class AerostackClient {
                 }
 
                 const response = await this.request('/auth/me', 'PATCH', updates, token);
+                this._token = token;
+                this._userId = response.user.id;
                 return response.user;
             },
         };
     }
 
     /**
+     * Set authentication context for the client
+     */
+    setAuth(token: string, userId: string) {
+        this._token = token;
+        this._userId = userId;
+    }
+
+    /**
+     * Realtime operations
+     */
+    get realtime() {
+        if (!this._realtime) {
+            this._realtime = new RealtimeClient({
+                baseUrl: this.baseUrl,
+                projectId: this.projectSlug,
+                token: this._token,
+                userId: this._userId
+            });
+        }
+        return this._realtime;
+    }
+
+    /**
+     * Call a custom Logic Lab function (API hook)
+     * Provides full autocomplete if ProjectSchema is generated.
+     */
+    async call<K extends keyof T['customApis'] & string>(
+        slug: K,
+        data: T['customApis'][K]['params'],
+        method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' = 'POST'
+    ): Promise<T['customApis'][K]['response']> {
+        return this.request(`/custom/${slug}`, method, data, undefined, { functionName: slug });
+    }
+
+    /**
+     * Database and Collections operations
+     */
+    get db() {
+        return {
+            /**
+             * Access a specific collection
+             */
+            collection: <K extends keyof T['collections'] & string>(name: K) => {
+                const projectSlug = this.projectSlug;
+                const request = this.request.bind(this);
+                const realtime = this.realtime;
+
+                return {
+                    /**
+                     * List items in the collection
+                     */
+                    list: async (params?: any): Promise<T['collections'][K][] | any[]> => {
+                        let query = '';
+                        if (params) {
+                            const searchParams = new URLSearchParams();
+                            for (const [key, value] of Object.entries(params)) {
+                                searchParams.set(key, String(value));
+                            }
+                            query = `?${searchParams.toString()}`;
+                        }
+                        return request(`/collections/${name}/items${query}`, 'GET');
+                    },
+
+                    /**
+                     * Get a single item by ID
+                     */
+                    get: async (id: string): Promise<T['collections'][K] | any> => {
+                        return request(`/collections/items/${id}`, 'GET');
+                    },
+
+                    /**
+                     * Create a new item
+                     */
+                    create: async (data: Partial<T['collections'][K]> | any): Promise<T['collections'][K] | any> => {
+                        return request(`/collections/${name}/items`, 'POST', data);
+                    },
+
+                    /**
+                     * Update an existing item
+                     */
+                    update: async (id: string, data: Partial<T['collections'][K]> | any): Promise<{ success: boolean }> => {
+                        return request(`/collections/items/${id}`, 'PUT', data);
+                    },
+
+                    /**
+                     * Delete an item
+                     */
+                    delete: async (id: string): Promise<{ success: boolean }> => {
+                        return request(`/collections/items/${id}`, 'DELETE');
+                    },
+
+                    /**
+                     * Subscribe to realtime updates for this collection
+                     */
+                    subscribe: (filter?: any) => {
+                        const topic = `table/${name}/${projectSlug}`;
+                        return realtime.channel(topic, { filter }).subscribe();
+                    },
+
+                    /**
+                     * Listen to specific realtime events
+                     */
+                    on: (event: RealtimeEvent, callback: RealtimeCallback) => {
+                        const topic = `table/${name}/${projectSlug}`;
+                        return realtime.channel(topic).on(event, callback);
+                    }
+                };
+            }
+        };
+    }
+
+    /**
      * Make HTTP request with comprehensive error handling
      */
-    private async request(path: string, method: string, body?: any, token?: string): Promise<any> {
+    private async request(path: string, method: string, body?: any, token?: string, options: { functionName?: string } = {}): Promise<any> {
         const url = `${this.baseUrl}/api/v1/public/projects/${this.projectSlug}${path}`;
+        const requestId = crypto.randomUUID();
 
-        const options: RequestInit = {
+        const fetchOptions: RequestInit = {
             method,
             headers: {
                 'Content-Type': 'application/json',
+                'x-request-id': requestId,
+                'x-aerostack-function': options.functionName || 'api_call',
+                'X-Project-Id': this.projectSlug,
                 ...(token && { Authorization: `Bearer ${token}` }),
+                ...(this.apiKey && { 'X-API-Key': this.apiKey }),
             },
         };
 
         if (body) {
-            options.body = JSON.stringify(body);
+            fetchOptions.body = JSON.stringify(body);
         }
 
         try {
-            const response = await fetch(url, options);
+            const response = await fetch(url, fetchOptions);
             const data: any = await response.json();
 
             if (!response.ok) {

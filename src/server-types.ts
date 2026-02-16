@@ -163,6 +163,67 @@ export interface GenerationResult {
     };
 }
 
+// ============ Search Types ============
+
+export interface SearchOptions {
+    topK?: number;
+    types?: string[];
+    filter?: Record<string, any>;
+}
+
+export interface IngestOptions {
+    id?: string;
+    type: string;
+    metadata?: Record<string, any>;
+}
+
+export interface SearchResult {
+    id: string;
+    content: string;
+    score: number;
+    type: string;
+    metadata: Record<string, any>;
+}
+
+export interface Product {
+    id?: string;
+    name: string;
+    description: string;
+    price?: number;
+    category?: string;
+    image?: string;
+    url?: string;
+    metadata?: Record<string, any>;
+}
+
+export interface FAQ {
+    id?: string;
+    question: string;
+    answer: string;
+    category?: string;
+    tags?: string[];
+    metadata?: Record<string, any>;
+}
+
+export interface SearchContent {
+    id?: string;
+    title: string;
+    body: string;
+    url?: string;
+    author?: string;
+    publishedAt?: string;
+    metadata?: Record<string, any>;
+}
+
+export interface TypeStats {
+    type: string;
+    count: number;
+}
+
+export interface SearchConfigureOptions {
+    model: 'english' | 'multilingual';
+}
+
 // ============ Service Types ============
 
 export interface InvokeOptions {
