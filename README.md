@@ -77,7 +77,7 @@ import { AerostackClient } from '@aerostack/sdk';
 
 const client = new AerostackClient({
   projectSlug: 'my-project',
-  baseUrl: 'https://api.aerostack.app' // optional
+  baseUrl: 'https://api.aerostack.dev' // optional
 });
 
 // Register user
@@ -284,7 +284,7 @@ bucket_name = "my-bucket"
 ```typescript
 const client = new AerostackClient({
   projectSlug: 'my-project',        // Required
-  baseUrl: 'https://api.aerostack.app' // Optional, defaults to production
+  baseUrl: 'https://api.aerostack.dev' // Optional, defaults to production
 });
 ```
 
