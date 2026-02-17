@@ -1,6 +1,6 @@
 {
     "name": "@aerostack/sdk",
-    "version": "0.3.2",
+    "version": "0.3.6",
     "description": "The official Aerostack SDK for server-side Workers and client authentication.",
     "main": "dist/index.js",
     "module": "dist/index.mjs",

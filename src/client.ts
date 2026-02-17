@@ -87,7 +87,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
 
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
-        this.baseUrl = config.baseUrl || 'https://api.aerostack.dev';
+        this.baseUrl = config.baseUrl || 'https://api.aerostack.ai/v1';
         this.apiKey = config.apiKey;
     }
 
@@ -113,7 +113,12 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                     );
                 }
 
-                return this.request('/auth/register', 'POST', data);
+                return this.request('/auth/signup', 'POST', {
+                    email: data.email,
+                    password: data.password,
+                    name: data.name,
+                    metadata: data.customFields
+                });
             },
 
             /**
@@ -124,7 +129,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                     throw new ValidationError('Email and password are required', 'email');
                 }
 
-                return this.request('/auth/login', 'POST', { email, password });
+                return this.request('/auth/signin', 'POST', { email, password });
             },
 
             /**
@@ -364,7 +369,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
      * Make HTTP request with comprehensive error handling
      */
     private async request(path: string, method: string, body?: any, token?: string, options: { functionName?: string } = {}): Promise<any> {
-        const url = `${this.baseUrl}/api/v1/public/projects/${this.projectSlug}${path}`;
+        const url = `${this.baseUrl}${path}`;
         const requestId = crypto.randomUUID();
 
         const fetchOptions: RequestInit = {
@@ -375,7 +380,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                 'x-aerostack-function': options.functionName || 'api_call',
                 'X-Project-Id': this.projectSlug,
                 ...(token && { Authorization: `Bearer ${token}` }),
-                ...(this.apiKey && { 'X-API-Key': this.apiKey }),
+                ...(this.apiKey && { 'X-Aerostack-Key': this.apiKey }),
             },
         };
 
