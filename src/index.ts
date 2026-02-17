@@ -9,9 +9,35 @@ export * from './client';
 export * from './server';
 export * from './realtime';
 
-// "Unified SDK" instance for convenience
-// Note: In server environments, it will need to be initialized with env
-// In client environments, it serves as the primary entry point
+/**
+ * Unified SDK singleton for convenience.
+ * 
+ * ⚠️ **Important**: This singleton can only be initialized in ONE mode:
+ * - Client mode (Auth, API calls) when `projectSlug` is provided
+ * - Server mode (DB, Queue, Storage) when only `env` is provided
+ * 
+ * **For Backend Wrappers**: If you need BOTH Auth AND DB features in the same Worker,
+ * use direct instantiation instead:
+ * 
+ * @example
+ * ```typescript
+ * // ✅ Recommended: Direct instantiation for dual-mode
+ * const client = new AerostackClient({ projectSlug: "my-project" });
+ * const server = new AerostackServer(env);
+ * 
+ * // Use both simultaneously
+ * const { user, token } = await client.auth.register({ email, password });
+ * await server.db.query('INSERT INTO users ...', [user.id]);
+ * ```
+ * 
+ * @example
+ * ```typescript
+ * // ⚠️ Singleton (can't use both modes together)
+ * sdk.init({ projectSlug: "my-project" }); // Client mode
+ * sdk.auth.login(...); // ✅ Works
+ * sdk.db.query(...);   // ❌ Error: "SDK not initialized"
+ * ```
+ */
 export const sdk = {
     _server: null as AerostackServer | null,
     _client: null as AerostackClient | null,

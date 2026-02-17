@@ -207,6 +207,74 @@ const result = await aerostack.services.invoke('billing-service', {
 });
 ```
 
+## Backend Wrapper Pattern
+
+**Use Case**: Building a backend service that needs **both** Auth/API features (Client SDK) and direct DB/Queue access (Server SDK).
+
+The global `sdk.init()` singleton can only operate in one mode at a time. For backend wrappers, **use direct instantiation**:
+
+### Dual-Mode Pattern
+
+```typescript
+import { AerostackClient, AerostackServer } from '@aerostack/sdk';
+
+export default {
+  async fetch(request: Request, env: Env) {
+    // Initialize both SDKs
+    const client = new AerostackClient({
+      projectSlug: "my-project",
+      // apiKey: env.ADMIN_API_KEY, // Optional: Admin privileges
+      baseUrl: env.API_URL || 'https://api.aerostack.dev'
+    });
+
+    const server = new AerostackServer(env);
+
+    // Example: Custom registration with organization setup
+    if (request.url.includes('/register-with-org')) {
+      const { email, password, companyName } = await request.json();
+
+      // 1. Register user via Client SDK (handles hashing, tokens)
+      const { user, token } = await client.auth.register({
+        email,
+        password,
+        name: companyName
+      });
+
+      // 2. Create organization via Server SDK
+      await server.db.query(
+        'INSERT INTO organizations (name, owner_id) VALUES (?, ?)',
+        [companyName, user.id]
+      );
+
+      // 3. Send welcome email via Queue
+      await server.queue.enqueue({
+        type: 'send-email',
+        data: { to: email, template: 'welcome' }
+      });
+
+      return Response.json({ user, token });
+    }
+
+    // ... more endpoints
+  }
+};
+```
+
+### When to Use This Pattern
+
+✅ **Use dual-mode when**:
+- Building API wrappers around Aerostack's Auth/E-commerce
+- Adding custom business logic to Auth flows
+- Combining public API calls with direct DB operations
+- Creating admin endpoints that need both Auth verification and DB access
+
+❌ **Don't use dual-mode when**:
+- You only need Auth (use `AerostackClient` alone)
+- You only need DB/Queue (use `AerostackServer` alone)
+- Building a pure frontend application (use `AerostackClient`)
+
+See [examples/backend-wrapper.ts](./examples/backend-wrapper.ts) for complete working examples.
+
 ## Error Handling
 
 Both SDKs provide structured error handling with actionable suggestions:
