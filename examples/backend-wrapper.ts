@@ -29,10 +29,10 @@ export default {
         // Initialize both Client and Server SDKs
         const client = new AerostackClient({
             projectSlug: env.PROJECT_SLUG,
-            // Optional: Use an Admin API Key for elevated permissions
-            // apiKey: env.ADMIN_API_KEY,
+            // 🔐 IMPORTANT: Use your Admin API Key for server-side auth operations
+            apiKey: env.ADMIN_API_KEY,
             // Optional: Point to local API during development
-            baseUrl: env.API_URL || 'https://api.aerostack.dev'
+            baseUrl: env.API_URL || 'https://api.aerostack.ai/v1'
         });
 
         const server = new AerostackServer(env);
