@@ -18,6 +18,13 @@ export interface RoutingRules {
     tables: Record<string, 'd1' | 'postgres'>;
 }
 
+export interface AerostackOptions {
+    routing?: RoutingRules;
+    storage?: R2Bucket;
+    storageBinding?: string;
+    projectId?: string;
+}
+
 export interface SchemaColumn {
     name: string;
     type: string;

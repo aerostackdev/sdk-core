@@ -44,6 +44,7 @@ import type {
     AuthContext,
     AuthHookResult,
     AerostackEnv,
+    AerostackOptions,
 } from './server-types';
 
 /**
@@ -65,18 +66,33 @@ export class AerostackServer {
     private _storage?: R2Bucket;
     private _ai?: Ai;
     private _dispatcher?: DurableObjectNamespace;
+    private _projectId?: string;
     private routingRules: RoutingRules;
     private env: AerostackEnv;
 
-    constructor(env: AerostackEnv, options: { routing?: RoutingRules } = {}) {
+    constructor(env: AerostackEnv, options: AerostackOptions = {}) {
         this.env = env;
         this._d1 = env.DB;
         this._kv = env.CACHE;
         this._queue = env.QUEUE;
-        this._storage = env.STORAGE;
         this._ai = env.AI;
         this._dispatcher = env.DISPATCHER;
         this.routingRules = options.routing || { tables: {} };
+
+        // Storage initialization logic
+        if (options.storage) {
+            // 1. Direct R2Bucket instance provided
+            this._storage = options.storage;
+        } else if (options.storageBinding) {
+            // 2. Custom binding name provided
+            this._storage = env[options.storageBinding] as R2Bucket;
+        } else {
+            // 3. Default to env.STORAGE
+            this._storage = env.STORAGE;
+        }
+
+        // Project ID for storage isolation
+        this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID;
 
         // Look for Postgres connection string in environment
         const pgConnStr = this.findPostgresConnStr(env);
@@ -333,6 +349,18 @@ export class AerostackServer {
     /**
      * R2 Storage operations
      */
+    /**
+     * Resolve storage key with project isolation if configured
+     */
+    private resolveKey(key: string): string {
+        if (this._projectId && !key.startsWith('projects/')) {
+            // Ensure no leading slash
+            const cleanKey = key.startsWith('/') ? key.slice(1) : key;
+            return `projects/${this._projectId}/media/${cleanKey}`;
+        }
+        return key;
+    }
+
     get storage() {
         return {
             /**
@@ -354,7 +382,8 @@ export class AerostackServer {
                 }
 
                 try {
-                    await this._storage.put(key, file, {
+                    const resolvedKey = this.resolveKey(key);
+                    await this._storage.put(resolvedKey, file, {
                         httpMetadata: {
                             contentType: options?.contentType,
                             cacheControl: options?.cacheControl,
@@ -363,19 +392,20 @@ export class AerostackServer {
                     });
 
                     // Get object to return size
-                    const obj = await this._storage.get(key);
+                    const obj = await this._storage.get(resolvedKey);
                     const size = obj?.size || 0;
 
                     return {
-                        key,
-                        url: `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${key}`,
+                        key: resolvedKey,
+                        url: `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`,
                         size,
                         contentType: options?.contentType || 'application/octet-stream',
                     };
                 } catch (err: any) {
+                    const resolvedKey = this.resolveKey(key);
                     throw new StorageError(
                         ErrorCode.STORAGE_UPLOAD_FAILED,
-                        `Failed to upload file: ${key}`,
+                        `Failed to upload file: ${resolvedKey}`,
                         {
                             suggestion: 'Check R2 bucket binding and file size limits',
                             cause: err.message,
@@ -399,8 +429,10 @@ export class AerostackServer {
                     );
                 }
 
+                const resolvedKey = this.resolveKey(key);
+
                 // For public buckets, return direct URL
-                return `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${key}`;
+                return `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`;
             },
 
             /**
@@ -418,11 +450,13 @@ export class AerostackServer {
                 }
 
                 try {
-                    await this._storage.delete(key);
+                    const resolvedKey = this.resolveKey(key);
+                    await this._storage.delete(resolvedKey);
                 } catch (err: any) {
+                    const resolvedKey = this.resolveKey(key);
                     throw new StorageError(
                         ErrorCode.STORAGE_DELETE_FAILED,
-                        `Failed to delete file: ${key}`,
+                        `Failed to delete file: ${resolvedKey}`,
                         {
                             cause: err.message,
                         },
@@ -446,7 +480,8 @@ export class AerostackServer {
                 }
 
                 try {
-                    const listed = await this._storage.list({ prefix });
+                    const resolvedPrefix = prefix ? this.resolveKey(prefix) : (this._projectId ? `projects/${this._projectId}/media/` : undefined);
+                    const listed = await this._storage.list({ prefix: resolvedPrefix });
                     return listed.objects.map((obj) => ({
                         key: obj.key,
                         size: obj.size,
