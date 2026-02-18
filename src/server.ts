@@ -109,7 +109,7 @@ export class AerostackServer {
             const res = await this.env.API.fetch('http://internal/internal/hooks/rpc', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ method, args })
+                body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
             });
             if (!res.ok) {
                 const errText = await res.text();
@@ -123,7 +123,7 @@ export class AerostackServer {
             const res = await fetch(`${this.env.API_URL}/internal/hooks/rpc`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ method, args })
+                body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
             });
             if (!res.ok) {
                 const errText = await res.text();
