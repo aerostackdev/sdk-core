@@ -235,6 +235,7 @@ export interface SearchConfigureOptions {
 
 export interface InvokeOptions {
     timeout?: number; // Milliseconds
+    path?: string;
 }
 
 export interface AuthContext {
@@ -252,10 +253,13 @@ export interface AuthHookResult {
 
 export interface AerostackEnv {
     DB?: D1Database;
+    DB_ECOMMERCE?: D1Database;
     CACHE?: KVNamespace;
     QUEUE?: Queue;
-    STORAGE?: R2Bucket;
+    MEDIA?: R2Bucket;
     AI?: Ai;
     DISPATCHER?: DurableObjectNamespace;
+    API?: Fetcher;
+    API_URL?: string;
     [key: string]: any;
 }

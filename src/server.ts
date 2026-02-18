@@ -8,6 +8,7 @@ import {
     ServiceError,
     ErrorCode,
 } from './server-errors';
+import { EcommerceService } from './ecommerce';
 import type {
     DatabaseResponse,
     RoutingRules,
@@ -99,6 +100,40 @@ export class AerostackServer {
         if (pgConnStr) {
             this.pgPool = new Pool({ connectionString: pgConnStr });
         }
+    }
+
+    private async _rpcCall(serviceName: string, method: string, args: any[]) {
+        // 1. Try Service Binding (API) if available and target is 'internal'
+        // This is the preferred way for Workers to talk to the main API
+        if (serviceName === 'internal' && this.env.API) {
+            const res = await this.env.API.fetch('http://internal/internal/hooks/rpc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ method, args })
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`RPC ${method} failed via Service Binding (${res.status}): ${errText}`);
+            }
+            return res.json();
+        }
+
+        // 2. Try HTTP URL if available
+        if (serviceName === 'internal' && this.env.API_URL) {
+            const res = await fetch(`${this.env.API_URL}/internal/hooks/rpc`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ method, args })
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`RPC ${method} failed via HTTP (${res.status}): ${errText}`);
+            }
+            return res.json();
+        }
+
+        // 3. Fallback to dispatcher (original logic)
+        return this.services.invoke(serviceName, { method, args }, { path: '/internal/hooks/rpc' });
     }
 
     /**
@@ -660,7 +695,7 @@ export class AerostackServer {
                         }
 
                         // Fallback: Use service invocation if available
-                        await self.services.invoke('internal.ai.search.ingest', { content, options });
+                        await self._rpcCall('internal', 'ai.search.ingest', [{ content, options }]);
                     },
 
                     /**
@@ -692,7 +727,7 @@ export class AerostackServer {
                             }));
                         }
 
-                        return self.services.invoke('internal.ai.search.query', { text, options });
+                        return self._rpcCall('internal', 'ai.search.query', [{ text, options }]);
                     },
 
                     /**
@@ -704,7 +739,7 @@ export class AerostackServer {
                             await vectorize.deleteByIds([id]);
                             return;
                         }
-                        await self.services.invoke('internal.ai.search.delete', { id });
+                        await self._rpcCall('internal', 'ai.search.delete', [{ id }]);
                     },
 
                     /**
@@ -713,7 +748,16 @@ export class AerostackServer {
                     deleteByType: async (type: string): Promise<void> => {
                         // Vectorize doesn't support delete by filter directly in all versions, 
                         // so we might need to route this to the API which has a DB backup
-                        await self.services.invoke('internal.ai.search.deleteByType', { type });
+                        await self._rpcCall('internal', 'ai.search.deleteByType', [{ type }]);
+                    },
+
+                    /**
+                     * List all types
+                     */
+                    listTypes: async (): Promise<TypeStats[]> => {
+                        const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
+                        // RPC fallback
+                        return self._rpcCall('internal', 'ai.search.listTypes', []);
                     },
 
                     /**
@@ -793,6 +837,63 @@ export class AerostackServer {
     }
 
     /**
+     * Ecommerce operations
+     */
+    get ecommerce() {
+        if (!this._projectId) {
+            throw new Error('Project ID required for ecommerce operations. Pass projectId in sdk.init() options.');
+        }
+        const service = new EcommerceService(this.env, this._projectId);
+        return {
+            products: {
+                list: (options: any) => service.listProducts(options),
+                get: (id: string) => service.getProduct(id)
+            },
+            orders: {
+                list: (options: any) => service.listOrders(options),
+                get: (id: string) => service.getOrder(id),
+                create: (data: any) => service.createOrder(data)
+            },
+            customers: {
+                list: (options: any) => service.listCustomers(options),
+                get: (id: string) => service.getCustomer(id)
+            },
+            analytics: {
+                getStats: (period?: string) => service.getStats(period)
+            }
+        };
+    }
+
+    /**
+     * Realtime Socket operations
+     */
+    get socket() {
+        return {
+            emit: async (event: string, data: any, roomId?: string) => {
+                // Use RPC to invoke socket emit via internal hooks API
+                return this._rpcCall('internal', 'socket.emit', [event, data, roomId]);
+            }
+        };
+    }
+
+    /**
+     * Auth operations (Server-side management via RPC)
+     */
+    get auth() {
+        return {
+            getUser: async (userId: string) => {
+                return this._rpcCall('internal', 'getUser', [userId]);
+            },
+            getUserByEmail: async (email: string) => {
+                return this._rpcCall('internal', 'getUserByEmail', [email]);
+            },
+            sendEmail: async (to: string, subject: string, body: string) => {
+                return this._rpcCall('internal', 'sendEmail', [to, subject, body]);
+            }
+        };
+    }
+
+    /**
      * Service invocation via Workers Dispatch
      */
     get services() {
@@ -821,8 +922,11 @@ export class AerostackServer {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
+                    const path = options?.path || '/';
+                    const url = `https://internal${path.startsWith('/') ? '' : '/'}${path}`;
+
                     const response = await stub.fetch(
-                        new Request('https://internal/', {
+                        new Request(url, {
                             method: 'POST',
                             body: JSON.stringify(data),
                             signal: controller.signal,
@@ -830,6 +934,11 @@ export class AerostackServer {
                     );
 
                     clearTimeout(timeoutId);
+
+                    if (!response.ok) {
+                        const errText = await response.text();
+                        throw new Error(`Service invocation failed (${response.status}): ${errText}`);
+                    }
 
                     return await response.json();
                 } catch (err: any) {

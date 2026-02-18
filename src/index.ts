@@ -66,9 +66,18 @@ export const sdk = {
         if (!this._server) throw new Error('SDK not initialized. Call sdk.init(env) first.');
         return this._server.services;
     },
+    get ecommerce() {
+        if (!this._server) throw new Error('SDK not initialized. Call sdk.init(env) first.');
+        return this._server.ecommerce;
+    },
+    get socket() {
+        if (!this._server) throw new Error('SDK not initialized. Call sdk.init(env) first.');
+        return this._server.socket;
+    },
     get auth() {
-        if (!this._client) throw new Error('SDK not initialized. Call sdk.init({ projectSlug: "..." }) first.');
-        return this._client.auth;
+        if (this._client) return this._client.auth;
+        if (this._server) return this._server.auth as any;
+        throw new Error('SDK not initialized. Call sdk.init(...) first.');
     },
 
     /**
