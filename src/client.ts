@@ -3,6 +3,7 @@ import { RealtimeClient, RealtimeEvent, RealtimeCallback } from './realtime';
 
 export interface SDKConfig {
     projectSlug: string;
+    projectId?: string;
     baseUrl?: string;
     apiKey?: string;
 }
@@ -79,6 +80,7 @@ export interface ProfileUpdate {
  */
 export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSchema> {
     private projectSlug: string;
+    private projectId?: string;
     private baseUrl: string;
     private apiKey?: string;
     private _realtime: RealtimeClient | null = null;
@@ -87,6 +89,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
 
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
+        this.projectId = config.projectId;
         this.baseUrl = config.baseUrl || 'https://api.aerostack.ai/v1';
         this.apiKey = config.apiKey;
     }
@@ -378,7 +381,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                 'Content-Type': 'application/json',
                 'x-request-id': requestId,
                 'x-aerostack-function': options.functionName || 'api_call',
-                'X-Project-Id': this.projectSlug,
+                'X-Project-Id': this.projectId || this.projectSlug,
                 ...(token && { Authorization: `Bearer ${token}` }),
                 ...(this.apiKey && { 'X-Aerostack-Key': this.apiKey }),
             },
