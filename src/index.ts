@@ -83,13 +83,13 @@ export const sdk = {
     /**
      * Initialize the SDK
      * - Pass a projectSlug (string) to initialize as a Client
-     * - Pass the Workers 'env' object to initialize as a Server
+     * - Pass the Workers 'env' object and optional AerostackOptions to initialize as a Server
      */
-    init(config: any) {
+    init(config: any, options?: any) {
         if (typeof config === 'object' && config.projectSlug) {
             this._client = new AerostackClient(config);
         } else {
-            this._server = new AerostackServer(config);
+            this._server = new AerostackServer(config, options);
         }
     }
 };
