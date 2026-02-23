@@ -59,7 +59,7 @@
         "access": "public"
     },
     "dependencies": {
-        "@aerostack/core": "file:../core",
+        "@aerostack/core": "^0.6.0",
         "@neondatabase/serverless": "^0.9.0"
     },
     "devDependencies": {
