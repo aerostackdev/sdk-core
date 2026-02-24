@@ -1,7 +1,8 @@
 {
     "name": "@aerostack/sdk",
-    "version": "0.6.1",
+    "version": "0.6.3",
     "description": "The official Aerostack SDK for server-side Workers and client authentication.",
+    "sideEffects": false,
     "main": "dist/index.js",
     "module": "dist/index.mjs",
     "types": "dist/index.d.ts",
@@ -20,6 +21,11 @@
             "types": "./dist/gateway/primitives.d.ts",
             "import": "./dist/gateway/primitives.mjs",
             "require": "./dist/gateway/primitives.js"
+        },
+        "./community": {
+            "types": "./dist/community.d.ts",
+            "import": "./dist/community.mjs",
+            "require": "./dist/community.js"
         }
     },
     "files": [
@@ -27,7 +33,7 @@
         "README.md"
     ],
     "scripts": {
-        "build": "tsup src/index.ts src/gateway/billing.ts src/gateway/primitives.ts --format cjs,esm --dts",
+        "build": "tsup src/index.ts src/gateway/billing.ts src/gateway/primitives.ts src/community.ts --format cjs,esm --dts",
         "dev": "tsup src/index.ts src/gateway/billing.ts src/gateway/primitives.ts --format cjs,esm --watch --dts",
         "lint": "eslint src/**/*.ts",
         "prepublishOnly": "npm run build",
@@ -59,7 +65,7 @@
         "access": "public"
     },
     "dependencies": {
-        "@aerostack/core": "^0.6.0",
+        "@aerostack/core": "^0.6.3",
         "@neondatabase/serverless": "^0.9.0"
     },
     "devDependencies": {

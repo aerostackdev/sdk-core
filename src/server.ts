@@ -1,4 +1,4 @@
-import { Pool } from '@neondatabase/serverless';
+import type { Pool } from '@neondatabase/serverless';
 import {
     DatabaseError,
     CacheError,
@@ -71,6 +71,21 @@ export class AerostackServer {
     private routingRules: RoutingRules;
     private env: AerostackEnv;
 
+    private async initPostgres(env: AerostackEnv) {
+        const pgConnStr = this.findPostgresConnStr(env);
+        if (pgConnStr) {
+            try {
+                // Dynamically import to prevent bloating the base SDK bundle for users who don't use Postgres
+                const { Pool } = await import('@neondatabase/serverless');
+                this.pgPool = new Pool({ connectionString: pgConnStr });
+            } catch (err) {
+                console.error("Aerostack: Failed to load @neondatabase/serverless. Postgres is configured but the driver could not be loaded.", err);
+            }
+        }
+    }
+
+    private _initPromise: Promise<void>;
+
     constructor(env: AerostackEnv, options: AerostackOptions = {}) {
         this.env = env;
         this._d1 = env.DB;
@@ -95,11 +110,8 @@ export class AerostackServer {
         // Project ID for storage isolation
         this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID;
 
-        // Look for Postgres connection string in environment
-        const pgConnStr = this.findPostgresConnStr(env);
-        if (pgConnStr) {
-            this.pgPool = new Pool({ connectionString: pgConnStr });
-        }
+        // Async init for dynamic dependencies
+        this._initPromise = this.initPostgres(env);
     }
 
     private async _rpcCall(serviceName: string, method: string, args: any[]) {
@@ -145,6 +157,7 @@ export class AerostackServer {
              * Execute a SQL query with automatic routing
              */
             query: async <T = any>(sql: string, params: any[] = []): Promise<DatabaseResponse<T>> => {
+                await this._initPromise;
                 return this.routeQuery<T>(sql, params);
             },
 
@@ -152,6 +165,7 @@ export class AerostackServer {
              * Get database schema information
              */
             getSchema: async (binding?: string): Promise<SchemaInfo> => {
+                await this._initPromise; // ensure postgres is loaded if configured
                 // If binding specified, get schema for that specific database
                 if (binding) {
                     if (this.pgPool && binding.toLowerCase().includes('postgres')) {
@@ -185,6 +199,7 @@ export class AerostackServer {
              * Execute multiple queries in a batch
              */
             batch: async (queries: BatchQuery[]): Promise<BatchResult> => {
+                await this._initPromise;
                 const results: DatabaseResponse[] = [];
                 const errors: Array<{ index: number; error: Error }> = [];
                 let success = true;

@@ -2,14 +2,12 @@
 import { AerostackClient } from './client';
 // Server SDK - Full backend platform
 import { AerostackServer } from './server';
-import { AerostackCommunity } from './community';
 
 // Convenience re-exports
-export { AerostackClient, AerostackServer, AerostackCommunity };
+export { AerostackClient, AerostackServer };
 export * from './client';
 export * from './server';
 export * from './realtime';
-export * from './community';
 
 /**
  * Unified SDK singleton for convenience.
@@ -43,14 +41,6 @@ export * from './community';
 export const sdk = {
     _server: null as AerostackServer | null,
     _client: null as AerostackClient | null,
-    _community: null as AerostackCommunity | null,
-
-    get community() {
-        if (!this._community) {
-            this._community = new AerostackCommunity();
-        }
-        return this._community;
-    },
 
     get db() {
         if (!this._server) throw new Error('SDK not initialized. Call sdk.init(env) first.');

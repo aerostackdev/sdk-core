@@ -1,4 +1,4 @@
-import { safeValidateRegistryConfig } from '@aerostack/core';
+import { safeValidateRegistryConfig } from '@aerostack/core/schemas/registry';
 
 /**
  * Aerostack Community Registry tools
