@@ -1111,11 +1111,17 @@ export class AerostackServer {
     }
 
     private findPostgresConnStr(env: Record<string, any>): string | undefined {
-        // Look for DATABASE_URL or anything ending in _DATABASE_URL
+        // 1. Look for DATABASE_URL or anything ending in _DATABASE_URL
         const entry = Object.entries(env).find(([key]) =>
             key === 'DATABASE_URL' || key.endsWith('_DATABASE_URL')
         );
-        return entry ? entry[1] : undefined;
+        if (entry) return entry[1];
+
+        // 2. Fallback: Check for Hyperdrive local connection strings (injected by Aerostack CLI)
+        const hyperdriveEntry = Object.entries(env).find(([key]) =>
+            key.startsWith('CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_')
+        );
+        return hyperdriveEntry ? hyperdriveEntry[1] : undefined;
     }
 }
 
