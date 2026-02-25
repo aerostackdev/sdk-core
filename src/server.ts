@@ -78,6 +78,7 @@ export class AerostackServer {
                 // Dynamically import to prevent bloating the base SDK bundle for users who don't use Postgres
                 const { Pool } = await import('@neondatabase/serverless');
                 this.pgPool = new Pool({ connectionString: pgConnStr });
+                console.log("Aerostack: Postgres initialized successfully with", pgConnStr.split('@')[1] || "connection string");
             } catch (err) {
                 console.error("Aerostack: Failed to load @neondatabase/serverless. Postgres is configured but the driver could not be loaded.", err);
             }
@@ -1031,7 +1032,11 @@ export class AerostackServer {
             return 'postgres';
         }
 
-        // Default to D1 for edge performance
+        // Default to Postgres if available and D1 is just the default local one, 
+        // or if explicitly prompted to prefer Postgres.
+        if (this.pgPool) return 'postgres';
+
+        // Otherwise default to D1
         return 'd1';
     }
 
@@ -1106,7 +1111,10 @@ export class AerostackServer {
     }
 
     private findPostgresConnStr(env: Record<string, any>): string | undefined {
-        const entry = Object.entries(env).find(([key]) => key.endsWith('_DATABASE_URL'));
+        // Look for DATABASE_URL or anything ending in _DATABASE_URL
+        const entry = Object.entries(env).find(([key]) =>
+            key === 'DATABASE_URL' || key.endsWith('_DATABASE_URL')
+        );
         return entry ? entry[1] : undefined;
     }
 }
