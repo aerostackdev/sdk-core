@@ -132,8 +132,9 @@ export class AerostackServer {
         }
 
         // 2. Try HTTP URL if available
-        if (serviceName === 'internal' && this.env.API_URL) {
-            const res = await fetch(`${this.env.API_URL}/internal/hooks/rpc`, {
+        const apiUrl = this.env.API_URL || this.env.AEROSTACK_API_URL;
+        if (serviceName === 'internal' && apiUrl) {
+            const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
@@ -923,7 +924,7 @@ export class AerostackServer {
                         ErrorCode.SERVICE_INVOKE_FAILED,
                         'Service dispatcher not configured',
                         {
-                            suggestion: 'Configure Workers Dispatch namespace in aerostack.toml',
+                            suggestion: 'Configure Workers Dispatch namespace in aerostack.toml or ensure API_URL/AEROSTACK_API_URL is set.',
                         }
                     );
                 }
