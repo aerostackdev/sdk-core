@@ -181,9 +181,11 @@ export class AerostackServer {
              */
             getSchema: async (binding?: string): Promise<SchemaInfo> => {
                 await this._initPromise; // ensure postgres is loaded if configured
+
                 // If binding specified, get schema for that specific database
                 if (binding) {
-                    if (this.pgPool && binding.toLowerCase().includes('postgres')) {
+                    const isPg = binding.toLowerCase().includes('pg') || binding.toLowerCase().includes('postgres');
+                    if (this.pgPool && isPg) {
                         return this.introspectPostgres();
                     }
                     if (this._d1) {
@@ -191,14 +193,14 @@ export class AerostackServer {
                     }
                 }
 
-                // Default: get D1 schema if available
-                if (this._d1) {
-                    return this.introspectD1();
-                }
-
-                // Otherwise Postgres
+                // Default: Prioritize Postgres if available (likely Neon/External)
                 if (this.pgPool) {
                     return this.introspectPostgres();
+                }
+
+                // Fallback to D1
+                if (this._d1) {
+                    return this.introspectD1();
                 }
 
                 throw new DatabaseError(
@@ -1045,9 +1047,11 @@ export class AerostackServer {
         if (normalized.includes('aerostack:target=d1')) return 'd1';
 
         // 2. Check routing rules based on table names
-        for (const [table, target] of Object.entries(this.routingRules.tables)) {
-            if (normalized.includes(table.toLowerCase())) {
-                return target;
+        if (this.routingRules.tables) {
+            for (const [table, target] of Object.entries(this.routingRules.tables)) {
+                if (normalized.includes(table.toLowerCase())) {
+                    return target;
+                }
             }
         }
 
@@ -1057,8 +1061,9 @@ export class AerostackServer {
             return 'postgres';
         }
 
-        // Default to Postgres if available and D1 is just the default local one, 
-        // or if explicitly prompted to prefer Postgres.
+        // 4. Default to Postgres if available.
+        // In Aerostack, Postgres (Neon) is usually the primary persistent store 
+        // when present, while D1 might be used for caching or local development.
         if (this.pgPool) return 'postgres';
 
         // Otherwise default to D1
