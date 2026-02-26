@@ -68,6 +68,8 @@ export class AerostackServer {
     private _ai?: Ai;
     private _dispatcher?: DurableObjectNamespace;
     private _projectId?: string;
+    private _authToken?: string;
+    private _hookId?: string;
     private routingRules: RoutingRules;
     private env: AerostackEnv;
 
@@ -95,6 +97,9 @@ export class AerostackServer {
         this._ai = env.AI;
         this._dispatcher = env.DISPATCHER;
         this.routingRules = options.routing || { tables: {} };
+        this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID;
+        this._authToken = options.authToken || env.AEROSTACK_API_KEY;
+        this._hookId = options.hookId || '';
 
         // Storage initialization logic
         if (options.storage) {
@@ -116,12 +121,20 @@ export class AerostackServer {
     }
 
     private async _rpcCall(serviceName: string, method: string, args: any[]) {
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/json'
+        };
+
+        if (this._authToken) {
+            headers['Authorization'] = `Bearer ${this._authToken}`;
+        }
+
         // 1. Try Service Binding (API) if available and target is 'internal'
         // This is the preferred way for Workers to talk to the main API
         if (serviceName === 'internal' && this.env.API) {
             const res = await this.env.API.fetch('http://internal/internal/hooks/rpc', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers,
                 body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
             });
             if (!res.ok) {
@@ -136,7 +149,7 @@ export class AerostackServer {
         if (serviceName === 'internal' && apiUrl) {
             const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers,
                 body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
             });
             if (!res.ok) {
@@ -355,13 +368,24 @@ export class AerostackServer {
              */
             enqueue: async (job: Job): Promise<JobResult> => {
                 if (!this._queue) {
-                    throw new QueueError(
-                        ErrorCode.QUEUE_NOT_CONFIGURED,
-                        'Queue not configured',
-                        {
-                            suggestion: 'Add [[queues]] binding to aerostack.toml',
-                        }
-                    );
+                    // Fallback to RPC for managed environments without direct queue binding
+                    try {
+                        await this._rpcCall('internal', 'queue.enqueue', [job.type, job.data]);
+                        return {
+                            jobId: `rpc_${Date.now()}`,
+                            status: 'queued',
+                            queuedAt: new Date()
+                        };
+                    } catch (rpcErr: any) {
+                        throw new QueueError(
+                            ErrorCode.QUEUE_NOT_CONFIGURED,
+                            'Queue not configured and RPC fallback failed',
+                            {
+                                suggestion: 'Add [[queues]] binding to aerostack.toml or ensure API is reachable',
+                                cause: rpcErr.message
+                            }
+                        );
+                    }
                 }
 
                 try {

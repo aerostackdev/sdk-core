@@ -23,6 +23,8 @@ export interface AerostackOptions {
     storage?: R2Bucket;
     storageBinding?: string;
     projectId?: string;
+    authToken?: string;
+    hookId?: string;
 }
 
 export interface SchemaColumn {
