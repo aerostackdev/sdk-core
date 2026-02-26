@@ -266,14 +266,16 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
 
     /**
      * Realtime operations
+     * Uses projectId when available (required for correct topic routing); falls back to projectSlug.
      */
     get realtime() {
         if (!this._realtime) {
             this._realtime = new RealtimeClient({
                 baseUrl: this.baseUrl,
-                projectId: this.projectSlug,
+                projectId: this.projectId ?? this.projectSlug,
                 token: this._token,
-                userId: this._userId
+                userId: this._userId,
+                apiKey: this.apiKey
             });
         }
         return this._realtime;

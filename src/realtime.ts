@@ -11,13 +11,24 @@ export interface RealtimeSubscriptionOptions {
     filter?: Record<string, any>;
 }
 
-export type RealtimeCallback = (payload: any) => void;
+export type RealtimeCallback<T = any> = (payload: RealtimePayload<T>) => void;
 
-export class RealtimeSubscription {
+/** Typed payload for realtime events */
+export interface RealtimePayload<T = any> {
+    type: 'db_change' | 'chat_message';
+    topic: string;
+    operation: RealtimeEvent;
+    data: T;
+    old?: T;
+    timestamp?: string;
+    [key: string]: any;
+}
+
+export class RealtimeSubscription<T = any> {
     private client: RealtimeClient;
     private topic: string;
     private options: RealtimeSubscriptionOptions;
-    private callbacks: Set<RealtimeCallback> = new Set();
+    private callbacks: Map<RealtimeEvent, Set<RealtimeCallback<T>>> = new Map();
     private isSubscribed: boolean = false;
 
     constructor(client: RealtimeClient, topic: string, options: RealtimeSubscriptionOptions = {}) {
@@ -26,8 +37,11 @@ export class RealtimeSubscription {
         this.options = options;
     }
 
-    on(event: RealtimeEvent, callback: RealtimeCallback): this {
-        this.callbacks.add(callback);
+    on(event: RealtimeEvent, callback: RealtimeCallback<T>): this {
+        if (!this.callbacks.has(event)) {
+            this.callbacks.set(event, new Set());
+        }
+        this.callbacks.get(event)!.add(callback);
         return this;
     }
 
@@ -53,16 +67,23 @@ export class RealtimeSubscription {
     }
 
     /** @internal */
-    _emit(payload: any): void {
+    _emit(payload: RealtimePayload<T>): void {
         const event = payload.operation as RealtimeEvent;
-        const requestedEvent = this.options.event || '*';
-
-        if (requestedEvent === '*' || requestedEvent === event) {
-            for (const cb of this.callbacks) {
-                cb(payload);
-            }
-        }
+        this.callbacks.get(event)?.forEach(cb => cb(payload));
+        this.callbacks.get('*')?.forEach(cb => cb(payload));
     }
+}
+
+export type RealtimeStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+
+export interface RealtimeClientOptions {
+    baseUrl: string;
+    projectId: string;
+    token?: string;
+    userId?: string;
+    apiKey?: string;
+    /** Max reconnect attempts before giving up (default: Infinity) */
+    maxReconnectAttempts?: number;
 }
 
 export class RealtimeClient {
@@ -76,18 +97,62 @@ export class RealtimeClient {
     private reconnectTimer: any = null;
     private heartbeatTimer: any = null;
     private reconnectAttempts: number = 0;
+    private _sendQueue: any[] = [];
+    private _connectingPromise: Promise<void> | null = null;
+    private _status: RealtimeStatus = 'idle';
+    private _statusListeners: Set<(s: RealtimeStatus) => void> = new Set();
+    // B3: Pong tracking
+    private _lastPong: number = 0;
+    // A16: Max reconnect attempts
+    private _maxReconnectAttempts: number;
+    private _maxRetriesListeners: Set<() => void> = new Set();
 
-    constructor(options: { baseUrl: string; projectId: string; token?: string; userId?: string; apiKey?: string }) {
-        this.baseUrl = options.baseUrl.replace(/^http/, 'ws') + '/realtime';
+    constructor(options: RealtimeClientOptions) {
+        const wsBase = options.baseUrl.replace(/\/v1\/?$/, '').replace(/^http/, 'ws');
+        this.baseUrl = `${wsBase}/api/realtime`;
         this.projectId = options.projectId;
         this.token = options.token;
         this.userId = options.userId;
         this.apiKey = options.apiKey;
+        this._maxReconnectAttempts = options.maxReconnectAttempts ?? Infinity;
+    }
+
+    get status(): RealtimeStatus { return this._status; }
+
+    /** Subscribe to connection status changes. Returns unsubscribe fn. */
+    onStatusChange(cb: (status: RealtimeStatus) => void): () => void {
+        this._statusListeners.add(cb);
+        return () => this._statusListeners.delete(cb);
+    }
+
+    /** Called when max reconnect attempts exceeded. Returns unsubscribe fn. */
+    onMaxRetriesExceeded(cb: () => void): () => void {
+        this._maxRetriesListeners.add(cb);
+        return () => this._maxRetriesListeners.delete(cb);
+    }
+
+    private _setStatus(s: RealtimeStatus) {
+        this._status = s;
+        this._statusListeners.forEach(cb => cb(s));
+    }
+
+    /** Update the auth token on a live connection (B4) */
+    setToken(newToken: string): void {
+        this.token = newToken;
+        this._send({ type: 'auth', token: newToken });
     }
 
     connect(): Promise<void> {
-        if (this.ws) return Promise.resolve();
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) return Promise.resolve();
+        if (this._connectingPromise) return this._connectingPromise;
+        this._connectingPromise = this._doConnect().finally(() => {
+            this._connectingPromise = null;
+        });
+        return this._connectingPromise;
+    }
 
+    private _doConnect(): Promise<void> {
+        this._setStatus('connecting');
         return new Promise((resolve, reject) => {
             const url = new URL(this.baseUrl);
             if (this.apiKey) {
@@ -101,10 +166,16 @@ export class RealtimeClient {
             this.ws = new WebSocket(url.toString());
 
             this.ws.onopen = () => {
-                console.log('Aerostack Realtime Connected');
-                this.reconnectAttempts = 0; // Reset backoff on success
+                this._setStatus('connected');
+                this.reconnectAttempts = 0;
+                this._lastPong = Date.now();
                 this.startHeartbeat();
-                // Re-subscribe to existing topics if any
+                // B5: Listen for online/offline in browser
+                this._setupOfflineDetection();
+                // Flush queued messages
+                while (this._sendQueue.length > 0) {
+                    this.ws!.send(JSON.stringify(this._sendQueue.shift()));
+                }
                 for (const sub of this.subscriptions.values()) {
                     sub.subscribe();
                 }
@@ -121,7 +192,7 @@ export class RealtimeClient {
             };
 
             this.ws.onclose = () => {
-                console.log('Aerostack Realtime Disconnected');
+                this._setStatus('reconnecting');
                 this.stopHeartbeat();
                 this.ws = null;
                 this.scheduleReconnect();
@@ -129,41 +200,61 @@ export class RealtimeClient {
 
             this.ws.onerror = (err) => {
                 console.error('Realtime connection error:', err);
+                this._setStatus('disconnected');
                 reject(err);
             };
         });
     }
 
     disconnect() {
+        this._setStatus('disconnected');
+        this.stopReconnect();
+        this.stopHeartbeat();
+        this._teardownOfflineDetection();
         if (this.ws) {
             this.ws.close();
+            this.ws = null;
         }
-        this.stopReconnect();
+        this._sendQueue = [];
     }
 
-    channel(topic: string, options: RealtimeSubscriptionOptions = {}): RealtimeSubscription {
+    channel<T = any>(topic: string, options: RealtimeSubscriptionOptions = {}): RealtimeSubscription<T> {
         const fullTopic = topic.includes('/') ? topic : `table/${topic}/${this.projectId}`;
-
         let sub = this.subscriptions.get(fullTopic);
         if (!sub) {
-            sub = new RealtimeSubscription(this, fullTopic, options);
+            sub = new RealtimeSubscription<T>(this, fullTopic, options);
             this.subscriptions.set(fullTopic, sub);
         }
-        return sub;
+        return sub as RealtimeSubscription<T>;
+    }
+
+    sendChat(roomId: string, text: string): void {
+        this._send({ type: 'chat', roomId, text });
+    }
+
+    chatRoom(roomId: string): RealtimeSubscription {
+        return this.channel(`chat/${roomId}/${this.projectId}`);
     }
 
     /** @internal */
     _send(data: any) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(data));
+        } else {
+            this._sendQueue.push(data);
         }
     }
 
     private handleMessage(data: RealtimeMessage) {
+        // B3: Track pong for liveness
+        if (data.type === 'pong') {
+            this._lastPong = Date.now();
+            return;
+        }
         if (data.type === 'db_change' || data.type === 'chat_message') {
             const sub = this.subscriptions.get(data.topic);
             if (sub) {
-                sub._emit(data);
+                sub._emit(data as any);
             }
         }
     }
@@ -171,16 +262,29 @@ export class RealtimeClient {
     private startHeartbeat() {
         this.heartbeatTimer = setInterval(() => {
             this._send({ type: 'ping' });
+            // B3: If no pong received in 70s (2+ missed heartbeats), force reconnect
+            if (this._lastPong > 0 && Date.now() - this._lastPong > 70000) {
+                console.warn('Realtime: no pong received, forcing reconnect');
+                this.ws?.close();
+            }
         }, 30000);
     }
 
     private stopHeartbeat() {
-        if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
     }
 
-    /** Exponential backoff with jitter: 1s → 2s → 4s → ... → 30s */
     private scheduleReconnect() {
         this.stopReconnect();
+        // A16: Check max retries
+        if (this.reconnectAttempts >= this._maxReconnectAttempts) {
+            this._setStatus('disconnected');
+            this._maxRetriesListeners.forEach(cb => cb());
+            return;
+        }
         const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
         const jitter = delay * 0.3 * Math.random();
         this.reconnectAttempts++;
@@ -190,6 +294,36 @@ export class RealtimeClient {
     }
 
     private stopReconnect() {
-        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+    }
+
+    // B5: Offline/online detection (browser only)
+    private _handleOnline = () => {
+        if (this._status !== 'connected') {
+            this.reconnectAttempts = 0; // Reset backoff
+            this.connect().catch(() => { });
+        }
+    };
+
+    private _handleOffline = () => {
+        this.stopReconnect(); // Don't waste retries while offline
+        this._setStatus('disconnected');
+    };
+
+    private _setupOfflineDetection() {
+        if (typeof window !== 'undefined') {
+            window.addEventListener('online', this._handleOnline);
+            window.addEventListener('offline', this._handleOffline);
+        }
+    }
+
+    private _teardownOfflineDetection() {
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('online', this._handleOnline);
+            window.removeEventListener('offline', this._handleOffline);
+        }
     }
 }
