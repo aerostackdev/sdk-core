@@ -155,15 +155,25 @@ export class RealtimeClient {
         this._setStatus('connecting');
         return new Promise((resolve, reject) => {
             const url = new URL(this.baseUrl);
-            if (this.apiKey) {
-                url.searchParams.set('apiKey', this.apiKey);
-            } else {
-                url.searchParams.set('projectId', this.projectId);
-            }
+            // Always include projectId in URL for routing (not auth)
+            url.searchParams.set('projectId', this.projectId);
             if (this.userId) url.searchParams.set('userId', this.userId);
             if (this.token) url.searchParams.set('token', this.token);
 
-            this.ws = new WebSocket(url.toString());
+            // SECURITY: Pass API key via Sec-WebSocket-Protocol header, NOT as a URL query param.
+            // URL query params appear in CDN logs, browser history, and Referer headers.
+            // Protocol format: "aerostack-key.<base64-encoded-key>"
+            const protocols: string[] = [];
+            if (this.apiKey) {
+                const encodedKey = typeof btoa !== 'undefined'
+                    ? btoa(this.apiKey)
+                    : Buffer.from(this.apiKey).toString('base64');
+                protocols.push(`aerostack-key.${encodedKey}`);
+            }
+
+            this.ws = protocols.length > 0
+                ? new WebSocket(url.toString(), protocols)
+                : new WebSocket(url.toString());
 
             this.ws.onopen = () => {
                 this._setStatus('connected');
