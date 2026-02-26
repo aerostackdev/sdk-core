@@ -1,6 +1,6 @@
 {
   "name": "@aerostack/sdk",
-  "version": "0.6.7",
+  "version": "0.6.8",
   "description": "The official Aerostack SDK for server-side Workers and client authentication.",
   "sideEffects": false,
   "main": "dist/index.js",
@@ -65,7 +65,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@aerostack/core": "^0.6.7",
+    "@aerostack/core": "^0.6.8",
     "@neondatabase/serverless": "^0.9.0"
   },
   "devDependencies": {
