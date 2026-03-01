@@ -75,13 +75,16 @@ export class AerostackServer {
 
     private async initPostgres(env: AerostackEnv) {
         const pgConnStr = this.findPostgresConnStr(env);
+
         if (pgConnStr) {
             try {
                 // Dynamically import to prevent bloating the base SDK bundle for users who don't use Postgres
                 const { Pool } = await import('@neondatabase/serverless');
                 this.pgPool = new Pool({ connectionString: pgConnStr });
+
                 console.log("Aerostack: Postgres initialized successfully with", pgConnStr.split('@')[1] || "connection string");
             } catch (err) {
+
                 console.error("Aerostack: Failed to load @neondatabase/serverless. Postgres is configured but the driver could not be loaded.", err);
             }
         }
@@ -1006,13 +1009,16 @@ export class AerostackServer {
 
         if (target === 'postgres' && this.pgPool) {
             try {
+
                 const result = await this.pgPool.query(sql, params);
+
                 return {
                     results: result.rows as T[],
                     success: true,
                     meta: { target: 'postgres', rowCount: result.rowCount || 0 },
                 };
             } catch (err: any) {
+
                 throw DatabaseError.fromPostgresError(err, { sql, params, target: 'postgres' });
             }
         }
@@ -1141,6 +1147,7 @@ export class AerostackServer {
     }
 
     private findPostgresConnStr(env: Record<string, any>): string | undefined {
+
         // 1. Look for DATABASE_URL or anything ending in _DATABASE_URL
         const entry = Object.entries(env).find(([key]) =>
             key === 'DATABASE_URL' || key.endsWith('_DATABASE_URL')
@@ -1151,7 +1158,14 @@ export class AerostackServer {
         const hyperdriveEntry = Object.entries(env).find(([key]) =>
             key.startsWith('CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_')
         );
-        return hyperdriveEntry ? hyperdriveEntry[1] : undefined;
+        if (hyperdriveEntry) return hyperdriveEntry[1] as string;
+
+        // 3. Hyperdrive binding (e.g. env.PG from wrangler): use .connectionString when present
+        const pgBinding = env?.PG;
+        if (pgBinding && typeof pgBinding === 'object' && typeof (pgBinding as any).connectionString === 'string') {
+            return (pgBinding as any).connectionString;
+        }
+        return undefined;
     }
 }
 
