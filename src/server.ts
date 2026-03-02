@@ -144,7 +144,7 @@ export class AerostackServer {
                 const errText = await res.text();
                 throw new Error(`RPC ${method} failed via Service Binding (${res.status}): ${errText}`);
             }
-            return res.json();
+            return this._parseRpcJson(res, method, 'Service Binding');
         }
 
         // 2. Try HTTP URL if available
@@ -159,11 +159,27 @@ export class AerostackServer {
                 const errText = await res.text();
                 throw new Error(`RPC ${method} failed via HTTP (${res.status}): ${errText}`);
             }
-            return res.json();
+            return this._parseRpcJson(res, method, apiUrl);
         }
 
         // 3. Fallback to dispatcher (original logic)
         return this.services.invoke(serviceName, { method, args }, { path: '/internal/hooks/rpc' });
+    }
+
+    /** Parse RPC response as JSON; throw a clear error if body is not valid JSON (e.g. worker default handler returned plain text) */
+    private async _parseRpcJson(res: Response, method: string, source: string): Promise<any> {
+        const text = await res.text();
+        try {
+            return text ? JSON.parse(text) : null;
+        } catch {
+            const preview = text.length > 80 ? text.slice(0, 80) + '...' : text;
+            throw new Error(
+                `RPC ${method} received non-JSON response from ${source}. ` +
+                `This usually means AEROSTACK_API_URL (or API binding) points to your worker instead of the Aerostack API. ` +
+                `For socket.emit and other RPC features, set AEROSTACK_API_URL to your API URL (e.g. https://api.aerostack.dev). ` +
+                `Response preview: "${preview}"`
+            );
+        }
     }
 
     /**
