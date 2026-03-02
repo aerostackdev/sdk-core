@@ -150,19 +150,32 @@ export class AerostackServer {
         // 2. Try HTTP URL if available
         const apiUrl = this.env.API_URL || this.env.AEROSTACK_API_URL;
         if (serviceName === 'internal' && apiUrl) {
-            const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
-            });
-            if (!res.ok) {
-                const errText = await res.text();
-                let errMsg = `Aerostack connection error (${res.status})`;
-                if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY.";
-                if (res.status === 404) errMsg = `Aerostack resource not found at ${apiUrl}. Check your AEROSTACK_API_URL.`;
-                throw new Error(`${errMsg} [Internal: HTTP ${method} ${res.status}] ${errText}`);
+            try {
+                const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ method, args, projectId: this._projectId ?? undefined })
+                });
+                if (!res.ok) {
+                    const errText = await res.text();
+                    let errMsg = `Aerostack connection error (${res.status})`;
+                    if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY.";
+                    if (res.status === 404) errMsg = `Aerostack resource not found at ${apiUrl}. Check your AEROSTACK_API_URL.`;
+                    throw new Error(`${errMsg} [Internal: HTTP ${method} ${res.status}] ${errText}`);
+                }
+                return this._parseRpcJson(res, method, apiUrl);
+            } catch (err: any) {
+                // If it's already an error we threw above, just rethrow it
+                if (err.message.includes('Aerostack')) throw err;
+
+                // Otherwise, it's a network/fetch error
+                throw new Error(
+                    `The SDK could not connect to the Aerostack API at ${apiUrl}. ` +
+                    `This usually means the API server is not running or the URL is blocked by a firewall/VPN. ` +
+                    `If running locally, ensure your API is started on this port. ` +
+                    `[Internal: fetch failed: ${err.message}]`
+                );
             }
-            return this._parseRpcJson(res, method, apiUrl);
         }
 
         // 3. Fallback to dispatcher (original logic)
