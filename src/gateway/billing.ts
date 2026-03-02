@@ -6,7 +6,7 @@
 export interface GatewayBillingLogOptions {
     /** Developer API key (ac_secret_... or project API key). */
     apiKey: string;
-    /** API base URL (default: https://api.aerostack.ai/v1). */
+    /** API base URL (default: https://api.aerocall.ai/v1). */
     baseUrl?: string;
     /** Consumer user ID (the end-user consuming your API). */
     consumerId: string;
@@ -28,7 +28,7 @@ export interface GatewayBillingLogResult {
  * and enqueues a billing event for Stripe metering. Use from any backend (Node, Worker, etc.).
  */
 export async function logUsage(options: GatewayBillingLogOptions): Promise<GatewayBillingLogResult> {
-    const baseUrl = (options.baseUrl || 'https://api.aerostack.ai/v1').replace(/\/$/, '');
+    const baseUrl = (options.baseUrl || 'https://api.aerocall.ai/v1').replace(/\/$/, '');
     const url = `${baseUrl}/gateway/billing/log`;
     const res = await fetch(url, {
         method: 'POST',

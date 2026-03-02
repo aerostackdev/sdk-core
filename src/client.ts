@@ -90,7 +90,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
         this.projectId = config.projectId;
-        this.baseUrl = config.baseUrl || 'https://api.aerostack.ai/v1';
+        this.baseUrl = config.baseUrl || 'https://api.aerocall.ai/v1';
         this.apiKey = config.apiKey;
     }
 

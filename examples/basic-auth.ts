@@ -14,7 +14,7 @@ import { AerostackClient } from '@aerostack/sdk';
 // Note: In a browser, these would be import.meta.env.VITE_... or similar
 const client = new AerostackClient({
     projectSlug: process.env.PROJECT_SLUG || 'demo-project',
-    baseUrl: process.env.API_URL || 'https://api.aerostack.ai/v1',
+    baseUrl: process.env.API_URL || 'https://api.aerocall.ai/v1',
     // apiKey: '...' // Only needed for admin operations or backend-to-backend calls
 });
 

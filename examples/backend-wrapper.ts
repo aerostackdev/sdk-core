@@ -32,7 +32,7 @@ export default {
             // 🔐 IMPORTANT: Use your Admin API Key for server-side auth operations
             apiKey: env.ADMIN_API_KEY,
             // Optional: Point to local API during development
-            baseUrl: env.API_URL || 'https://api.aerostack.ai/v1'
+            baseUrl: env.API_URL || 'https://api.aerocall.ai/v1'
         });
 
         const server = new AerostackServer(env);
