@@ -142,7 +142,7 @@ export class AerostackServer {
             });
             if (!res.ok) {
                 const errText = await res.text();
-                throw new Error(`RPC ${method} failed via Service Binding (${res.status}): ${errText}`);
+                throw new Error(`Aerostack connection error (${res.status}): ${errText} [Internal: Service Binding ${method}]`);
             }
             return this._parseRpcJson(res, method, 'Service Binding');
         }
@@ -157,7 +157,10 @@ export class AerostackServer {
             });
             if (!res.ok) {
                 const errText = await res.text();
-                throw new Error(`RPC ${method} failed via HTTP (${res.status}): ${errText}`);
+                let errMsg = `Aerostack connection error (${res.status})`;
+                if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY.";
+                if (res.status === 404) errMsg = `Aerostack resource not found at ${apiUrl}. Check your AEROSTACK_API_URL.`;
+                throw new Error(`${errMsg} [Internal: HTTP ${method} ${res.status}] ${errText}`);
             }
             return this._parseRpcJson(res, method, apiUrl);
         }
@@ -174,10 +177,10 @@ export class AerostackServer {
         } catch {
             const preview = text.length > 80 ? text.slice(0, 80) + '...' : text;
             throw new Error(
-                `RPC ${method} received non-JSON response from ${source}. ` +
-                `This usually means AEROSTACK_API_URL (or API binding) points to your worker instead of the Aerostack API. ` +
-                `For socket.emit and other RPC features, set AEROSTACK_API_URL to your API URL (e.g. https://api.aerostack.dev). ` +
-                `Response preview: "${preview}"`
+                `Failed to communicate with Aerostack API at ${source}. ` +
+                `This usually means your AEROSTACK_API_URL points to the wrong service (like your own worker) or the API is unavailable. ` +
+                `Ensure AEROSTACK_API_URL is set to a valid Aerostack API (e.g., https://api.aerostack.dev). ` +
+                `[Internal: ${method} expected JSON, received "${preview}"]`
             );
         }
     }
