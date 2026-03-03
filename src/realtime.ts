@@ -226,7 +226,14 @@ export class RealtimeClient {
     }
 
     channel<T = any>(topic: string, options: RealtimeSubscriptionOptions = {}): RealtimeSubscription<T> {
-        const fullTopic = topic.includes('/') ? topic : `table/${topic}/${this.projectId}`;
+        let fullTopic: string;
+        if (!topic.includes('/')) {
+            fullTopic = `table/${topic}/${this.projectId}`;
+        } else if (this.projectId && topic.endsWith(`/${this.projectId}`)) {
+            fullTopic = topic; // already fully qualified
+        } else {
+            fullTopic = `${topic}/${this.projectId}`; // e.g. 'table/orders' → 'table/orders/<projectId>'
+        }
         let sub = this.subscriptions.get(fullTopic);
         if (!sub) {
             sub = new RealtimeSubscription<T>(this, fullTopic, options);
