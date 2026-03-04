@@ -1,4 +1,4 @@
-export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE' | '*';
+export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE' | '*' | string;
 
 export interface RealtimeMessage {
     type: string;
@@ -15,20 +15,32 @@ export type RealtimeCallback<T = any> = (payload: RealtimePayload<T>) => void;
 
 /** Typed payload for realtime events */
 export interface RealtimePayload<T = any> {
-    type: 'db_change' | 'chat_message';
+    type: 'db_change' | 'chat_message' | 'event';
     topic: string;
-    operation: RealtimeEvent;
+    operation?: RealtimeEvent;
+    event?: string;
     data: T;
     old?: T;
-    timestamp?: string;
+    userId?: string;
+    timestamp?: number | string;
     [key: string]: any;
+}
+
+/** Chat history message returned from REST API */
+export interface HistoryMessage {
+    id: string;
+    room_id: string;
+    user_id: string;
+    event: string;
+    data: any;
+    created_at: number;
 }
 
 export class RealtimeSubscription<T = any> {
     private client: RealtimeClient;
-    private topic: string;
+    topic: string;
     private options: RealtimeSubscriptionOptions;
-    private callbacks: Map<RealtimeEvent, Set<RealtimeCallback<T>>> = new Map();
+    private callbacks: Map<string, Set<RealtimeCallback<T>>> = new Map();
     private isSubscribed: boolean = false;
 
     constructor(client: RealtimeClient, topic: string, options: RealtimeSubscriptionOptions = {}) {
@@ -37,11 +49,18 @@ export class RealtimeSubscription<T = any> {
         this.options = options;
     }
 
-    on(event: RealtimeEvent, callback: RealtimeCallback<T>): this {
+    /** Listen for DB change events (INSERT/UPDATE/DELETE/*) or custom named events */
+    on(event: RealtimeEvent | string, callback: RealtimeCallback<T>): this {
         if (!this.callbacks.has(event)) {
             this.callbacks.set(event, new Set());
         }
         this.callbacks.get(event)!.add(callback);
+        return this;
+    }
+
+    /** Remove a specific callback for an event */
+    off(event: RealtimeEvent | string, callback: RealtimeCallback<T>): this {
+        this.callbacks.get(event)?.delete(callback);
         return this;
     }
 
@@ -66,10 +85,55 @@ export class RealtimeSubscription<T = any> {
         this.callbacks.clear();
     }
 
+    // ─── Phase 1: Pub/Sub — Publish custom events ─────────────────────────
+    /** Publish a custom event to all subscribers on this channel */
+    publish(event: string, data: any, options?: { persist?: boolean }): void {
+        this.client._send({
+            type: 'publish',
+            topic: this.topic,
+            event,
+            data,
+            persist: options?.persist,
+            id: this.client._generateId(),
+        });
+    }
+
+    // ─── Phase 2: Chat History ────────────────────────────────────────────
+    /** Fetch persisted message history for this channel (requires persist: true on publish) */
+    async getHistory(limit: number = 50, before?: number): Promise<HistoryMessage[]> {
+        return this.client._fetchHistory(this.topic, limit, before);
+    }
+
+    // ─── Phase 3: Presence ────────────────────────────────────────────────
+    /** Track this user's presence state on this channel (auto-synced to subscribers) */
+    track(state: Record<string, any>): void {
+        this.client._send({
+            type: 'track',
+            topic: this.topic,
+            state,
+        });
+    }
+
+    /** Stop tracking presence on this channel */
+    untrack(): void {
+        this.client._send({
+            type: 'untrack',
+            topic: this.topic,
+        });
+    }
+
     /** @internal */
     _emit(payload: RealtimePayload<T>): void {
-        const event = payload.operation as RealtimeEvent;
-        this.callbacks.get(event)?.forEach(cb => cb(payload));
+        // DB change events (INSERT/UPDATE/DELETE)
+        if (payload.operation) {
+            const event = payload.operation as string;
+            this.callbacks.get(event)?.forEach(cb => cb(payload));
+        }
+        // Custom named events ('player-moved', 'presence:join', etc.)
+        if (payload.event) {
+            this.callbacks.get(payload.event)?.forEach(cb => cb(payload));
+        }
+        // Catch-all
         this.callbacks.get('*')?.forEach(cb => cb(payload));
     }
 }
@@ -101,15 +165,18 @@ export class RealtimeClient {
     private _connectingPromise: Promise<void> | null = null;
     private _status: RealtimeStatus = 'idle';
     private _statusListeners: Set<(s: RealtimeStatus) => void> = new Set();
-    // B3: Pong tracking
+    // HTTP base URL for REST endpoints (history, etc.)
+    private _httpBaseUrl: string;
+    // Pong tracking
     private _lastPong: number = 0;
-    // A16: Max reconnect attempts
+    // Max reconnect attempts
     private _maxReconnectAttempts: number;
     private _maxRetriesListeners: Set<() => void> = new Set();
 
     constructor(options: RealtimeClientOptions) {
         const wsBase = options.baseUrl.replace(/\/v1\/?$/, '').replace(/^http/, 'ws');
         this.baseUrl = `${wsBase}/api/realtime`;
+        this._httpBaseUrl = options.baseUrl.replace(/\/v1\/?$/, '');
         this.projectId = options.projectId;
         this.token = options.token;
         this.userId = options.userId;
@@ -136,7 +203,7 @@ export class RealtimeClient {
         this._statusListeners.forEach(cb => cb(s));
     }
 
-    /** Update the auth token on a live connection (B4) */
+    /** Update the auth token on a live connection */
     setToken(newToken: string): void {
         this.token = newToken;
         this._send({ type: 'auth', token: newToken });
@@ -155,14 +222,11 @@ export class RealtimeClient {
         this._setStatus('connecting');
         return new Promise((resolve, reject) => {
             const url = new URL(this.baseUrl);
-            // Always include projectId in URL for routing (not auth)
             url.searchParams.set('projectId', this.projectId);
             if (this.userId) url.searchParams.set('userId', this.userId);
             if (this.token) url.searchParams.set('token', this.token);
 
-            // SECURITY: Pass API key via Sec-WebSocket-Protocol header, NOT as a URL query param.
-            // URL query params appear in CDN logs, browser history, and Referer headers.
-            // Protocol format: "aerostack-key.<base64-encoded-key>"
+            // SECURITY: Pass API key via Sec-WebSocket-Protocol header only
             const protocols: string[] = [];
             if (this.apiKey) {
                 protocols.push(`aerostack-key.${this.apiKey}`);
@@ -177,7 +241,6 @@ export class RealtimeClient {
                 this.reconnectAttempts = 0;
                 this._lastPong = Date.now();
                 this.startHeartbeat();
-                // B5: Listen for online/offline in browser
                 this._setupOfflineDetection();
                 // Flush queued messages
                 while (this._sendQueue.length > 0) {
@@ -242,12 +305,19 @@ export class RealtimeClient {
         return sub as RealtimeSubscription<T>;
     }
 
-    sendChat(roomId: string, text: string): void {
-        this._send({ type: 'chat', roomId, text });
+    /** Legacy: send a chat message (now persisted to DB) */
+    sendChat(roomId: string, text: string, metadata?: Record<string, any>): void {
+        this._send({ type: 'chat', roomId, text, metadata });
     }
 
+    /** Legacy: get a chat room subscription */
     chatRoom(roomId: string): RealtimeSubscription {
         return this.channel(`chat/${roomId}/${this.projectId}`);
+    }
+
+    /** @internal — Generate unique message ID for ack tracking */
+    _generateId(): string {
+        return Math.random().toString(36).slice(2) + Date.now().toString(36);
     }
 
     /** @internal */
@@ -259,16 +329,51 @@ export class RealtimeClient {
         }
     }
 
+    /** @internal — Fetch chat/event history via REST API */
+    async _fetchHistory(room: string, limit: number = 50, before?: number): Promise<HistoryMessage[]> {
+        const url = new URL(`${this._httpBaseUrl}/api/v1/public/realtime/history`);
+        url.searchParams.set('room', room);
+        url.searchParams.set('limit', String(limit));
+        if (before) url.searchParams.set('before', String(before));
+
+        const headers: Record<string, string> = {};
+        if (this.apiKey) headers['X-Aerostack-Key'] = this.apiKey;
+        if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+
+        const res = await fetch(url.toString(), { headers });
+        const json = await res.json() as any;
+        return json.messages || [];
+    }
+
     private handleMessage(data: RealtimeMessage) {
-        // B3: Track pong for liveness
+        // Track pong for liveness
         if (data.type === 'pong') {
             this._lastPong = Date.now();
             return;
         }
-        if (data.type === 'db_change' || data.type === 'chat_message') {
+
+        // Ack (fire-and-forget acknowledgment from server)
+        if (data.type === 'ack') {
+            return;
+        }
+
+        // Route to subscription: db_change, chat_message, event, presence:*
+        if (data.type === 'db_change' || data.type === 'chat_message' || data.type === 'event') {
             const sub = this.subscriptions.get(data.topic);
             if (sub) {
                 sub._emit(data as any);
+            }
+        }
+
+        // Re-key subscription on server-confirmed topic (for non-TS SDKs compatibility)
+        if (data.type === 'subscribed' && data.topic) {
+            for (const [origTopic, sub] of this.subscriptions.entries()) {
+                if (data.topic !== origTopic && data.topic.startsWith(origTopic)) {
+                    this.subscriptions.delete(origTopic);
+                    sub.topic = data.topic;
+                    this.subscriptions.set(data.topic, sub);
+                    break;
+                }
             }
         }
     }
@@ -276,7 +381,6 @@ export class RealtimeClient {
     private startHeartbeat() {
         this.heartbeatTimer = setInterval(() => {
             this._send({ type: 'ping' });
-            // B3: If no pong received in 70s (2+ missed heartbeats), force reconnect
             if (this._lastPong > 0 && Date.now() - this._lastPong > 70000) {
                 console.warn('Realtime: no pong received, forcing reconnect');
                 this.ws?.close();
@@ -293,7 +397,6 @@ export class RealtimeClient {
 
     private scheduleReconnect() {
         this.stopReconnect();
-        // A16: Check max retries
         if (this.reconnectAttempts >= this._maxReconnectAttempts) {
             this._setStatus('disconnected');
             this._maxRetriesListeners.forEach(cb => cb());
@@ -314,16 +417,16 @@ export class RealtimeClient {
         }
     }
 
-    // B5: Offline/online detection (browser only)
+    // Offline/online detection (browser only)
     private _handleOnline = () => {
         if (this._status !== 'connected') {
-            this.reconnectAttempts = 0; // Reset backoff
+            this.reconnectAttempts = 0;
             this.connect().catch(() => { });
         }
     };
 
     private _handleOffline = () => {
-        this.stopReconnect(); // Don't waste retries while offline
+        this.stopReconnect();
         this._setStatus('disconnected');
     };
 
