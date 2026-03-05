@@ -43,6 +43,7 @@ export interface RegisterData {
     password: string;
     name?: string;
     customFields?: Record<string, any>;
+    turnstileToken?: string;
 }
 
 export interface OTPResponse {
@@ -69,7 +70,16 @@ export interface LogoutResponse {
 
 export interface ProfileUpdate {
     name?: string;
+    avatar_url?: string;
+    avatar_image_id?: string;
     customFields?: Record<string, any>;
+}
+
+export interface OTPSendResponse {
+    success: boolean;
+    message?: string;
+    accountExists?: boolean;
+    error?: string;
 }
 
 /**
@@ -78,6 +88,21 @@ export interface ProfileUpdate {
  * Provides client-side authentication, database access, and 
  * custom logic invocation with full type-safety.
  */
+export interface GatewayUsageSummary {
+    total_tokens: number;
+    total_requests: number;
+    days: number;
+}
+
+export interface GatewayWallet {
+    balance: number;
+    total_purchased: number;
+    total_consumed: number;
+    plan_type: string;
+    hard_limit: number | null;
+    soft_limit: number | null;
+}
+
 export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSchema> {
     private projectSlug: string;
     private projectId?: string;
@@ -86,6 +111,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     private _realtime: RealtimeClient | null = null;
     private _token?: string;
     private _userId?: string;
+    private _consumerKey?: string;
 
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
@@ -97,127 +123,161 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     /**
      * Authentication operations
      */
+    /**
+     * Base URL for public auth endpoints: /api/v1/public/projects/:projectSlug/auth
+     * Derives from baseUrl by stripping the /v1 suffix and using the full API path.
+     */
+    private get _authBase(): string {
+        // e.g. https://api.aerocall.ai/v1 → https://api.aerocall.ai/api/v1/public/projects/slug
+        const host = this.baseUrl.replace(/\/v1\/?$/, '');
+        return `${host}/api/v1/public/projects/${this.projectSlug}/auth`;
+    }
+
+    private async _authRequest(path: string, method: string, body?: any, token?: string): Promise<any> {
+        const url = `${this._authBase}${path}`;
+        const requestId = crypto.randomUUID();
+
+        const fetchOptions: RequestInit = {
+            method,
+            headers: {
+                'Content-Type': 'application/json',
+                'x-request-id': requestId,
+                ...(token && { Authorization: `Bearer ${token}` }),
+            },
+        };
+        if (body && method !== 'GET') {
+            fetchOptions.body = JSON.stringify(body);
+        }
+
+        const response = await fetch(url, fetchOptions);
+        const data: any = await response.json();
+
+        if (!response.ok) {
+            const errorCode = this.mapErrorCode(data.code, response.status);
+            throw new ClientError(
+                errorCode,
+                data.message || data.error || 'Auth request failed',
+                { suggestion: this.getSuggestion(errorCode, data), field: data.field },
+                response.status
+            );
+        }
+        return data;
+    }
+
     get auth() {
         return {
             /**
              * Register a new user
              */
             register: async (data: RegisterData): Promise<AuthResponse> => {
-                // Client-side validation
                 if (!data.email || !data.email.includes('@')) {
                     throw new ValidationError('Invalid email address', 'email', 'Provide a valid email address');
                 }
-
                 if (!data.password || data.password.length < 8) {
-                    throw new ValidationError(
-                        'Password must be at least 8 characters',
-                        'password',
-                        'Use a stronger password with minimum 8 characters'
-                    );
+                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a stronger password with minimum 8 characters');
                 }
-
-                return this.request('/auth/signup', 'POST', {
+                return this._authRequest('/register', 'POST', {
                     email: data.email,
                     password: data.password,
                     name: data.name,
-                    metadata: data.customFields
+                    customFields: data.customFields,
+                    ...(data.turnstileToken && { turnstileToken: data.turnstileToken }),
                 });
             },
 
             /**
              * Login with email and password
              */
-            login: async (email: string, password: string): Promise<AuthResponse> => {
+            login: async (email: string, password: string, turnstileToken?: string): Promise<AuthResponse> => {
                 if (!email || !password) {
                     throw new ValidationError('Email and password are required', 'email');
                 }
-
-                return this.request('/auth/signin', 'POST', { email, password });
+                return this._authRequest('/login', 'POST', { email, password, ...(turnstileToken && { turnstileToken }) });
             },
 
             /**
-             * Send OTP code to email
+             * Send OTP code to email or phone
              */
-            sendOTP: async (email: string): Promise<OTPResponse> => {
-                if (!email || !email.includes('@')) {
-                    throw new ValidationError('Invalid email address', 'email');
+            sendOTP: async (identifier: string, type: 'email' | 'phone' = 'email'): Promise<OTPSendResponse> => {
+                if (!identifier) {
+                    throw new ValidationError('Email or phone is required', 'identifier');
                 }
-
-                return this.request('/auth/otp/send', 'POST', { email });
+                const body = type === 'phone' ? { phone: identifier } : { email: identifier };
+                return this._authRequest('/otp/send', 'POST', body);
             },
 
             /**
              * Verify OTP code and login
              */
-            verifyOTP: async (email: string, code: string): Promise<AuthResponse> => {
-                if (!email || !code) {
-                    throw new ValidationError('Email and code are required');
+            verifyOTP: async (identifier: string, code: string, type: 'email' | 'phone' = 'email'): Promise<AuthResponse> => {
+                if (!identifier || !code) {
+                    throw new ValidationError('Identifier and code are required');
                 }
-
                 if (code.length !== 6 || !/^\d+$/.test(code)) {
                     throw new ValidationError('OTP code must be 6 digits', 'code');
                 }
-
-                return this.request('/auth/otp/verify', 'POST', { email, code });
+                const body = type === 'phone' ? { phone: identifier, code } : { email: identifier, code };
+                return this._authRequest('/otp/verify', 'POST', body);
             },
 
             /**
-             * Verify email with token
+             * Verify email with token from the verification email
              */
             verifyEmail: async (token: string): Promise<VerifyResponse> => {
                 if (!token) {
                     throw new ValidationError('Verification token is required', 'token');
                 }
+                return this._authRequest(`/verify-email?token=${encodeURIComponent(token)}`, 'GET');
+            },
 
-                return this.request(`/auth/verify-email?token=${token}`, 'GET');
+            /**
+             * Resend email verification link
+             */
+            resendVerificationEmail: async (email: string): Promise<VerifyResponse> => {
+                if (!email || !email.includes('@')) {
+                    throw new ValidationError('Invalid email address', 'email');
+                }
+                return this._authRequest('/resend-verification', 'POST', { email });
             },
 
             /**
              * Request password reset email
              */
-            requestPasswordReset: async (email: string): Promise<ResetResponse> => {
+            requestPasswordReset: async (email: string, turnstileToken?: string): Promise<ResetResponse> => {
                 if (!email || !email.includes('@')) {
                     throw new ValidationError('Invalid email address', 'email');
                 }
-
-                return this.request('/auth/password-reset/request', 'POST', { email });
+                return this._authRequest('/reset-password-request', 'POST', { email, ...(turnstileToken && { turnstileToken }) });
             },
 
             /**
-             * Reset password with token
+             * Reset password using token from the reset email
              */
-            resetPassword: async (token: string, newPassword: string): Promise<AuthResponse> => {
+            resetPassword: async (token: string, newPassword: string): Promise<ResetResponse> => {
                 if (!token) {
                     throw new ValidationError('Reset token is required', 'token');
                 }
-
                 if (!newPassword || newPassword.length < 8) {
-                    throw new ValidationError(
-                        'Password must be at least 8 characters',
-                        'password',
-                        'Use a stronger password'
-                    );
+                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a stronger password');
                 }
-
-                return this.request('/auth/password-reset/confirm', 'POST', { token, newPassword });
+                return this._authRequest('/reset-password', 'POST', { token, newPassword });
             },
 
             /**
-             * Refresh access token using refresh token
+             * Refresh access token using a refresh token
              */
             refreshToken: async (refreshToken: string): Promise<AuthResponse> => {
                 if (!refreshToken) {
                     throw new ValidationError('Refresh token is required', 'refreshToken');
                 }
-
-                return this.request('/auth/refresh', 'POST', { refreshToken });
+                return this._authRequest('/refresh', 'POST', { refreshToken });
             },
 
             /**
              * Logout and invalidate tokens
              */
-            logout: async (token: string): Promise<LogoutResponse> => {
-                return this.request('/auth/logout', 'POST', {}, token);
+            logout: async (token: string, refreshToken?: string): Promise<LogoutResponse> => {
+                return this._authRequest('/logout', 'POST', { ...(refreshToken && { refreshToken }), accessToken: token }, token);
             },
 
             /**
@@ -225,33 +285,33 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
              */
             getCurrentUser: async (token: string): Promise<User> => {
                 if (!token) {
-                    throw new AuthenticationError(
-                        ClientErrorCode.AUTH_TOKEN_INVALID,
-                        'Authentication token is required',
-                        { suggestion: 'Please login first' }
-                    );
+                    throw new AuthenticationError(ClientErrorCode.AUTH_TOKEN_INVALID, 'Authentication token is required', { suggestion: 'Please login first' });
                 }
-
-                const response = await this.request('/auth/me', 'GET', undefined, token);
-                return response.user;
+                const response = await this._authRequest('/me', 'GET', undefined, token);
+                return response.user ?? response;
             },
 
             /**
-             * Update user profile
+             * Update user profile (name, avatar, custom fields)
              */
             updateProfile: async (token: string, updates: ProfileUpdate): Promise<User> => {
                 if (!token) {
-                    throw new AuthenticationError(
-                        ClientErrorCode.AUTH_TOKEN_INVALID,
-                        'Authentication token is required',
-                        { suggestion: 'Please login first' }
-                    );
+                    throw new AuthenticationError(ClientErrorCode.AUTH_TOKEN_INVALID, 'Authentication token is required', { suggestion: 'Please login first' });
                 }
-
-                const response = await this.request('/auth/me', 'PATCH', updates, token);
+                const response = await this._authRequest('/me', 'PATCH', updates, token);
                 this._token = token;
-                this._userId = response.user.id;
-                return response.user;
+                if (response.user?.id) this._userId = response.user.id;
+                return response.user ?? response;
+            },
+
+            /**
+             * Delete user avatar
+             */
+            deleteAvatar: async (token: string): Promise<{ message: string }> => {
+                if (!token) {
+                    throw new AuthenticationError(ClientErrorCode.AUTH_TOKEN_INVALID, 'Authentication token is required', { suggestion: 'Please login first' });
+                }
+                return this._authRequest('/me/avatar', 'DELETE', undefined, token);
             },
         };
     }
@@ -279,6 +339,212 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
             });
         }
         return this._realtime;
+    }
+
+    /**
+     * AI Gateway operations
+     *
+     * Provides consumer-facing access to gateway-proxied AI APIs:
+     * - Non-streaming and streaming chat completions
+     * - WebSocket connections
+     * - Usage and wallet queries
+     */
+    get gateway() {
+        const self = this;
+        const host = this.baseUrl.replace(/\/v1\/?$/, '');
+
+        return {
+            /**
+             * Set the consumer API key for gateway requests.
+             * Format: ask_live_XXXX or ask_test_XXXX
+             */
+            setConsumerKey(key: string) {
+                self._consumerKey = key;
+            },
+
+            /**
+             * Non-streaming chat completion via the gateway.
+             */
+            complete: async (opts: {
+                apiSlug: string;
+                messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+                model?: string;
+            }): Promise<{ content: string; tokensUsed: number }> => {
+                const url = `${host}/api/gateway/${opts.apiSlug}/v1/chat/completions`;
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                if (this._consumerKey) headers['Authorization'] = `Bearer ${this._consumerKey}`;
+                else if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+                if (this.apiKey) headers['X-Aerostack-Key'] = this.apiKey;
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        messages: opts.messages,
+                        stream: false,
+                        ...(opts.model ? { model: opts.model } : {}),
+                    }),
+                });
+
+                if (!response.ok) {
+                    const err: any = await response.json().catch(() => ({}));
+                    throw new ClientError(
+                        this.mapErrorCode(err.code, response.status),
+                        err.error || err.message || 'Gateway request failed',
+                        { suggestion: 'Check your consumer key and API slug' },
+                        response.status
+                    );
+                }
+
+                const data: any = await response.json();
+                return {
+                    content: data.choices?.[0]?.message?.content ?? '',
+                    tokensUsed: data.usage?.total_tokens ?? 0,
+                };
+            },
+
+            /**
+             * Streaming chat completion with token-by-token callbacks.
+             */
+            stream: async (opts: {
+                apiSlug: string;
+                messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+                model?: string;
+                onToken: (delta: string) => void;
+                onDone?: (usage: { tokensUsed: number }) => void;
+            }): Promise<void> => {
+                const url = `${host}/api/gateway/${opts.apiSlug}/v1/chat/completions`;
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                if (this._consumerKey) headers['Authorization'] = `Bearer ${this._consumerKey}`;
+                else if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+                if (this.apiKey) headers['X-Aerostack-Key'] = this.apiKey;
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        messages: opts.messages,
+                        stream: true,
+                        ...(opts.model ? { model: opts.model } : {}),
+                    }),
+                });
+
+                if (!response.ok || !response.body) {
+                    const err: any = await response.json().catch(() => ({}));
+                    throw new ClientError(
+                        this.mapErrorCode(err.code, response.status),
+                        err.error || err.message || 'Gateway stream failed',
+                        { suggestion: 'Check your consumer key and API slug' },
+                        response.status
+                    );
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let totalTokens = 0;
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const payload = line.slice(6).trim();
+                        if (payload === '[DONE]') {
+                            opts.onDone?.({ tokensUsed: totalTokens });
+                            return;
+                        }
+                        try {
+                            const parsed = JSON.parse(payload);
+                            const delta = parsed.choices?.[0]?.delta?.content;
+                            if (delta) opts.onToken(delta);
+                            if (parsed.usage?.total_tokens) totalTokens = parsed.usage.total_tokens;
+                        } catch {
+                            // Skip malformed SSE frames
+                        }
+                    }
+                }
+                opts.onDone?.({ tokensUsed: totalTokens });
+            },
+
+            /**
+             * Connect a WebSocket to a gateway AI API for real-time bidirectional communication.
+             */
+            connectWebSocket: async (opts: {
+                apiSlug: string;
+                onMessage: (data: any) => void;
+                onClose?: () => void;
+            }): Promise<WebSocket> => {
+                const wsHost = host.replace(/^http/, 'ws');
+                const wsUrl = `${wsHost}/api/gateway/${opts.apiSlug}/ws`;
+                const protocols: string[] = [];
+                if (this._consumerKey) protocols.push(`bearer-${this._consumerKey}`);
+                else if (this._token) protocols.push(`bearer-${this._token}`);
+
+                const ws = new WebSocket(wsUrl, protocols.length > 0 ? protocols : undefined);
+                ws.onmessage = (event) => {
+                    try {
+                        opts.onMessage(JSON.parse(event.data as string));
+                    } catch {
+                        opts.onMessage(event.data);
+                    }
+                };
+                ws.onclose = () => opts.onClose?.();
+                return ws;
+            },
+
+            /**
+             * Get usage summary for a gateway API.
+             */
+            usage: async (apiSlug: string, days?: number): Promise<GatewayUsageSummary> => {
+                const params = new URLSearchParams({ api_slug: apiSlug });
+                if (days !== undefined) params.set('days', String(days));
+                const url = `${host}/api/gateway/me/usage?${params.toString()}`;
+                const headers: Record<string, string> = {};
+                if (this._consumerKey) headers['Authorization'] = `Bearer ${this._consumerKey}`;
+                else if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+
+                const response = await fetch(url, { method: 'GET', headers });
+                if (!response.ok) {
+                    const err: any = await response.json().catch(() => ({}));
+                    throw new ClientError(
+                        this.mapErrorCode(err.code, response.status),
+                        err.error || err.message || 'Failed to fetch usage',
+                        { suggestion: 'Ensure you are authenticated' },
+                        response.status
+                    );
+                }
+                return response.json() as Promise<GatewayUsageSummary>;
+            },
+
+            /**
+             * Get current wallet balance for a gateway API.
+             */
+            wallet: async (apiSlug: string): Promise<GatewayWallet> => {
+                const params = new URLSearchParams({ api_slug: apiSlug });
+                const url = `${host}/api/gateway/me/wallet?${params.toString()}`;
+                const headers: Record<string, string> = {};
+                if (this._consumerKey) headers['Authorization'] = `Bearer ${this._consumerKey}`;
+                else if (this._token) headers['Authorization'] = `Bearer ${this._token}`;
+
+                const response = await fetch(url, { method: 'GET', headers });
+                if (!response.ok) {
+                    const err: any = await response.json().catch(() => ({}));
+                    throw new ClientError(
+                        this.mapErrorCode(err.code, response.status),
+                        err.error || err.message || 'Failed to fetch wallet',
+                        { suggestion: 'Ensure you are authenticated' },
+                        response.status
+                    );
+                }
+                const data: any = await response.json();
+                return data.wallet as GatewayWallet;
+            },
+        };
     }
 
     /**
