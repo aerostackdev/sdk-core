@@ -664,6 +664,108 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     }
 
     /**
+     * AI Vector Search operations
+     *
+     * Ingest, query, and manage semantic vector embeddings for your project.
+     * Requires a secret API key with the `ai:search` or `ai:ingest` scope.
+     *
+     * ```typescript
+     * const sdk = new AerostackClient({ projectSlug: 'my-app', apiKey: 'sk_live_...' });
+     *
+     * // Ingest content
+     * await sdk.ai.search.ingest('The user manual for X...', { id: 'doc-1', type: 'documentation' });
+     *
+     * // Semantic query
+     * const { results } = await sdk.ai.search.query('How do I set up my device?', { topK: 3 });
+     * ```
+     */
+    get ai() {
+        const request = this.request.bind(this);
+        return {
+            search: {
+                /**
+                 * Ingest content into the vector index.
+                 * @param content The text content to embed and store
+                 * @param options id, type (required), metadata
+                 */
+                ingest: async (
+                    content: string,
+                    options: { id?: string; type: string; metadata?: Record<string, any> }
+                ): Promise<{ success: boolean }> => {
+                    return request('/ai/search/ingest', 'POST', { content, ...options });
+                },
+
+                /**
+                 * Perform a semantic similarity search.
+                 * @param text The query text
+                 * @param options topK, types filter, extra filter
+                 */
+                query: async (
+                    text: string,
+                    options?: { topK?: number; types?: string[]; filter?: Record<string, any> }
+                ): Promise<{ results: Array<{ id: string; content: string; score: number; type: string; metadata: Record<string, any> }> }> => {
+                    return request('/ai/search/query', 'POST', { text, ...options });
+                },
+
+                /**
+                 * Delete a single vector by its user-facing ID.
+                 */
+                delete: async (id: string): Promise<{ success: boolean }> => {
+                    return request('/ai/search/delete', 'POST', { id });
+                },
+
+                /**
+                 * Delete all vectors of a specific type for this project.
+                 */
+                deleteByType: async (type: string): Promise<{ success: boolean }> => {
+                    return request('/ai/search/deleteByType', 'POST', { type });
+                },
+
+                /**
+                 * List all distinct types and their vector counts.
+                 */
+                listTypes: async (): Promise<{ types: Array<{ type: string; count: number }> }> => {
+                    return request('/ai/search/listTypes', 'GET');
+                },
+
+                /**
+                 * Configure the embedding model for this project.
+                 * @param embeddingModel 'english' (default, bge-base-en) or 'multilingual' (bge-m3)
+                 */
+                configure: async (options: { embeddingModel: 'english' | 'multilingual' }): Promise<{ success: boolean }> => {
+                    return request('/ai/search/configure', 'POST', options);
+                },
+
+                /**
+                 * Update an existing vector by re-embedding with new content.
+                 * Equivalent to delete + ingest but preserves the original ID.
+                 */
+                update: async (
+                    id: string,
+                    content: string,
+                    options?: { type?: string; metadata?: Record<string, any> }
+                ): Promise<{ success: boolean }> => {
+                    return request('/ai/search/update', 'POST', { id, content, ...options });
+                },
+
+                /**
+                 * Get total vector count, optionally filtered by type.
+                 */
+                count: async (type?: string): Promise<{ count: number }> => {
+                    return request('/ai/search/count', 'POST', { type });
+                },
+
+                /**
+                 * Get a single vector by its user-facing ID.
+                 */
+                get: async (id: string): Promise<{ result: { id: string; content: string; score: number; type: string; metadata: Record<string, any> } | null; exists: boolean }> => {
+                    return request('/ai/search/get', 'POST', { id });
+                },
+            }
+        };
+    }
+
+    /**
      * Call a custom Logic Lab function (API hook)
      * Provides full autocomplete if ProjectSchema is generated.
      */
