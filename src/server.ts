@@ -681,6 +681,20 @@ export class AerostackServer {
         return key;
     }
 
+    /**
+     * Normalize a storage key for the RPC path:
+     * - Strip leading slash
+     * - Reject path traversal segments (`..`)
+     * The server (AerocallHookSDK) handles project-scoping automatically.
+     */
+    private sanitizeStorageKey(key: string): string {
+        const clean = key.startsWith('/') ? key.slice(1) : key;
+        if (clean.split('/').some(seg => seg === '..')) {
+            throw new StorageError(ErrorCode.STORAGE_UPLOAD_FAILED, 'Invalid storage key: path traversal not allowed', {});
+        }
+        return clean;
+    }
+
     get storage() {
         return {
             /**
@@ -747,16 +761,19 @@ export class AerostackServer {
                         blob = new Blob([buf], { type: options?.contentType || 'application/octet-stream' });
                     }
 
-                    const resolvedKey = this.resolveKey(key);
+                    // For the RPC path, pass the sanitized key — AerocallHookSDK on the server
+                    // prepends projects/{projectId}/ automatically, so resolveKey() must NOT
+                    // be called here or the path will be doubled.
+                    const rawKey = this.sanitizeStorageKey(key);
                     const formData = new FormData();
-                    formData.append('file', blob, resolvedKey.split('/').pop() || 'upload');
-                    formData.append('key', resolvedKey);
+                    formData.append('file', blob, rawKey.split('/').pop() || 'upload');
+                    formData.append('key', rawKey);
                     if (options?.contentType) formData.append('contentType', options.contentType);
 
                     const res = await this._storageApiCall('upload', formData);
                     const data = await res.json<{ url: string }>();
                     return {
-                        key: resolvedKey,
+                        key: rawKey,
                         url: data.url,
                         size: blob.size,
                         contentType: options?.contentType || blob.type,
@@ -776,9 +793,8 @@ export class AerostackServer {
                     return `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`;
                 }
 
-                // Platform storage: ask the API for the URL
-                const resolvedKey = this.resolveKey(key);
-                const res = await this._storageApiCall('getUrl', { key: resolvedKey });
+                // Platform storage: sanitized key — server handles project scoping
+                const res = await this._storageApiCall('getUrl', { key: this.sanitizeStorageKey(key) });
                 const data = await res.json<{ url: string }>();
                 return data.url;
             },
@@ -803,8 +819,8 @@ export class AerostackServer {
                     }
                 }
 
-                // Platform storage path
-                await this._storageApiCall('delete', { key: this.resolveKey(key) });
+                // Platform storage path — server handles project scoping
+                await this._storageApiCall('delete', { key: this.sanitizeStorageKey(key) });
             },
 
             /**
@@ -831,9 +847,8 @@ export class AerostackServer {
                     }
                 }
 
-                // Platform storage path
-                const resolvedPrefix = prefix ? this.resolveKey(prefix) : undefined;
-                const res = await this._storageApiCall('list', { prefix: resolvedPrefix });
+                // Platform storage path — server handles project scoping
+                const res = await this._storageApiCall('list', { prefix: prefix ? this.sanitizeStorageKey(prefix) : undefined });
                 const data = await res.json<{ objects: StorageObject[] }>();
                 return data.objects ?? [];
             },
