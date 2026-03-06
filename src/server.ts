@@ -247,6 +247,87 @@ export class AerostackServer {
         return res;
     }
 
+    /**
+     * Call a platform AI RPC endpoint at {apiUrl}/v1/ai/{path}.
+     * Used as fallback when no direct AI binding is configured (platform model).
+     */
+    private async _aiApiCall(path: string, body?: Record<string, any>, method: 'POST' | 'GET' = 'POST'): Promise<any> {
+        // Pre-flight: require auth token when using RPC path (no direct binding)
+        if (!this._authToken) {
+            throw new AIError(
+                ErrorCode.AI_REQUEST_FAILED,
+                'AEROSTACK_API_KEY is required for platform AI operations. Set it in your environment or pass authToken in options.',
+                {}
+            );
+        }
+
+        // Allowlist valid operations to prevent URL path traversal
+        const VALID_PATHS = new Set([
+            'chat',
+            'search/ingest',
+            'search/query',
+            'search/delete',
+            'search/deleteByType',
+            'search/listTypes',
+            'search/configure',
+            'search/update',
+            'search/get',
+            'search/count',
+        ]);
+        if (!VALID_PATHS.has(path)) {
+            throw new AIError(ErrorCode.AI_REQUEST_FAILED, `Invalid AI operation: ${path}`, {});
+        }
+
+        // SSRF guard: parse URL and verify scheme + hostname explicitly
+        // Allow https:// (any host) or http://localhost|127.0.0.1 (local dev only).
+        // Reject http:// to private RFC-1918/IPv6 ranges.
+        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerocall.ai';
+        let apiUrl: string;
+        try {
+            const u = new URL(rawUrl);
+            const h = u.hostname;
+            const isLocalDev =
+                h === 'localhost' ||
+                h === '127.0.0.1' ||
+                h === '[::1]';
+            const isPrivate =
+                /^10\./.test(h) ||
+                /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+                /^192\.168\./.test(h) ||
+                h === '169.254.169.254'; // cloud metadata endpoint
+            const allowed =
+                u.protocol === 'https:' ||
+                (u.protocol === 'http:' && isLocalDev && !isPrivate);
+            apiUrl = allowed ? rawUrl : 'https://api.aerocall.ai';
+        } catch {
+            apiUrl = 'https://api.aerocall.ai';
+        }
+
+        const headers: Record<string, string> = {
+            'Authorization': `Bearer ${this._authToken}`,
+        };
+        if (method !== 'GET') {
+            headers['Content-Type'] = 'application/json';
+        }
+
+        const res = await fetch(`${apiUrl}/v1/ai/${path}`, {
+            method,
+            headers,
+            ...(method !== 'GET' && body !== undefined ? { body: JSON.stringify(body) } : {}),
+            signal: AbortSignal.timeout(60000), // AI calls can be slow
+        });
+
+        if (!res.ok) {
+            const errText = await res.text();
+            let msg = `AI ${path} failed (${res.status})`;
+            if (res.status === 401) msg = 'Aerostack authentication failed. Check your AEROSTACK_API_KEY.';
+            if (res.status === 403) msg = 'API key does not have permission for AI operations. Check your key scopes.';
+            throw new AIError(ErrorCode.AI_REQUEST_FAILED, msg, { cause: errText });
+        }
+
+        return res.json();
+    }
+
     /** Parse RPC response as JSON; throw a clear error if body is not valid JSON (e.g. worker default handler returned plain text) */
     private async _parseRpcJson(res: Response, method: string, source: string): Promise<any> {
         const text = await res.text();
@@ -866,13 +947,12 @@ export class AerostackServer {
              */
             chat: async (messages: Message[], options?: ChatOptions): Promise<ChatResponse> => {
                 if (!self._ai) {
-                    throw new AIError(
-                        ErrorCode.AI_NOT_CONFIGURED,
-                        'AI binding not configured',
-                        {
-                            suggestion: 'AI binding is automatically available in Workers',
-                        }
-                    );
+                    // RPC fallback — platform handles the AI binding
+                    const result = await self._aiApiCall('chat', {
+                        model: options?.model || '@cf/meta/llama-3-8b-instruct',
+                        messages,
+                    });
+                    return { response: result.response || '', usage: result.usage };
                 }
 
                 try {
@@ -909,9 +989,9 @@ export class AerostackServer {
                 if (!self._ai) {
                     throw new AIError(
                         ErrorCode.AI_NOT_CONFIGURED,
-                        'AI binding not configured',
+                        'AI binding not configured. Add [ai] to your aerostack.toml to enable direct AI embedding.',
                         {
-                            suggestion: 'AI binding is automatically available in Workers',
+                            suggestion: 'Add [ai] binding = "AI" to your aerostack.toml, or use sdk.ai.search.ingest/query which handle embeddings server-side automatically.',
                         }
                     );
                 }
@@ -943,13 +1023,12 @@ export class AerostackServer {
              */
             generate: async (prompt: string, options?: GenerateOptions): Promise<GenerationResult> => {
                 if (!self._ai) {
-                    throw new AIError(
-                        ErrorCode.AI_NOT_CONFIGURED,
-                        'AI binding not configured',
-                        {
-                            suggestion: 'AI binding is automatically available in Workers',
-                        }
-                    );
+                    // RPC fallback — convert prompt to chat format
+                    const result = await self._aiApiCall('chat', {
+                        model: options?.model || '@cf/meta/llama-3-8b-instruct',
+                        messages: [{ role: 'user', content: prompt }],
+                    });
+                    return { text: result.response || '', usage: result.usage };
                 }
 
                 try {
@@ -984,22 +1063,18 @@ export class AerostackServer {
             get search() {
                 return {
                     /**
-                     * Ingest content into managed search index
+                     * Ingest content into the managed search index.
+                     * Uses direct Vectorize binding + AI embedding if both are available,
+                     * otherwise routes to the Aerostack platform API which handles embedding server-side.
                      */
                     ingest: async (content: string, options: IngestOptions): Promise<void> => {
                         const { id = crypto.randomUUID(), type, metadata = {} } = options;
 
-                        // 1. Get embedding
-                        const embedding = await self.ai.embed(content);
-
-                        // 2. Storage and Vectorize update via internal API or direct bindings
-                        // For standalone SDK, we assume user might handle storage or we provide a default managed path
-                        // However, to keep it "managed", we should ideally route this to Aerostack API 
-                        // IF the SDK is initialized with an apiKey.
-
-                        // IF we have direct bindings, we can do it directly
                         const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
-                        if (vectorize) {
+
+                        // Fast path: direct bindings — embed locally and upsert into Vectorize
+                        if (vectorize && self._ai) {
+                            const embedding = await self.ai.embed(content);
                             await vectorize.upsert([{
                                 id,
                                 values: embedding.embedding,
@@ -1012,21 +1087,23 @@ export class AerostackServer {
                             return;
                         }
 
-                        // Fallback: Use service invocation if available
-                        await self._rpcCall('internal', 'ai.search.ingest', [{ content, options }]);
+                        // RPC fallback — platform handles embedding + Vectorize upsert
+                        await self._aiApiCall('search/ingest', { content, id, type, metadata });
                     },
 
                     /**
-                     * Search managed index
+                     * Query the managed search index.
+                     * Uses direct Vectorize binding + AI embedding if both are available,
+                     * otherwise routes to the Aerostack platform API which handles embedding server-side.
                      */
                     query: async (text: string, options?: SearchOptions): Promise<SearchResult[]> => {
                         const topK = options?.topK || 5;
 
-                        // 1. Get embedding
-                        const embedding = await self.ai.embed(text);
-
                         const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
-                        if (vectorize) {
+
+                        // Fast path: direct bindings
+                        if (vectorize && self._ai) {
+                            const embedding = await self.ai.embed(text);
                             const queryOptions: any = { topK, returnMetadata: true };
                             if (options?.types) {
                                 queryOptions.filter = { type: { $in: options.types } };
@@ -1045,11 +1122,13 @@ export class AerostackServer {
                             }));
                         }
 
-                        return self._rpcCall('internal', 'ai.search.query', [{ text, options }]);
+                        // RPC fallback — platform handles embedding + Vectorize query
+                        const result = await self._aiApiCall('search/query', { text, ...options });
+                        return result.results || [];
                     },
 
                     /**
-                     * Delete item by ID
+                     * Delete a search entry by ID
                      */
                     delete: async (id: string): Promise<void> => {
                         const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
@@ -1057,32 +1136,57 @@ export class AerostackServer {
                             await vectorize.deleteByIds([id]);
                             return;
                         }
-                        await self._rpcCall('internal', 'ai.search.delete', [{ id }]);
+                        await self._aiApiCall('search/delete', { id });
                     },
 
                     /**
-                     * Delete all items of a certain type
+                     * Delete all search entries of a given type
                      */
                     deleteByType: async (type: string): Promise<void> => {
-                        // Vectorize doesn't support delete by filter directly in all versions, 
-                        // so we might need to route this to the API which has a DB backup
-                        await self._rpcCall('internal', 'ai.search.deleteByType', [{ type }]);
+                        await self._aiApiCall('search/deleteByType', { type });
                     },
 
                     /**
-                     * List all types
+                     * List all content types in the search index with counts
                      */
                     listTypes: async (): Promise<TypeStats[]> => {
-                        const vectorize = (self.env as any).VECTORIZE as VectorizeIndex;
-                        // RPC fallback
-                        return self._rpcCall('internal', 'ai.search.listTypes', []);
+                        const result = await self._aiApiCall('search/listTypes', undefined, 'GET');
+                        return result.types || [];
                     },
 
                     /**
-                     * Configure search settings
+                     * Configure search settings (embedding model, etc.)
                      */
                     configure: async (options: SearchConfigureOptions): Promise<void> => {
-                        await self.services.invoke('internal.ai.search.configure', options);
+                        await self._aiApiCall('search/configure', options);
+                    },
+
+                    /**
+                     * Update an existing search entry's content
+                     */
+                    update: async (id: string, content: string, options?: Partial<IngestOptions>): Promise<void> => {
+                        await self._aiApiCall('search/update', {
+                            id,
+                            content,
+                            type: options?.type,
+                            metadata: options?.metadata,
+                        });
+                    },
+
+                    /**
+                     * Get a specific search entry by ID
+                     */
+                    get: async (id: string): Promise<SearchResult | null> => {
+                        const result = await self._aiApiCall('search/get', { id });
+                        return result.exists ? result.result : null;
+                    },
+
+                    /**
+                     * Count search entries, optionally filtered by type
+                     */
+                    count: async (type?: string): Promise<number> => {
+                        const result = await self._aiApiCall('search/count', { type });
+                        return result.count ?? 0;
                     },
 
                     /**
