@@ -5,6 +5,11 @@ import { AerostackServer } from './server';
 
 // Convenience re-exports
 export { AerostackClient, AerostackServer };
+// `Aerostack` is the ergonomic alias for documentation and hub examples:
+//   import { Aerostack } from '@aerostack/sdk'
+//   const ai = new Aerostack({ projectSlug: 'my-product' })
+//   await ai.stream(response, { userId: 'u1', model: 'gpt-4o', onToken: ... })
+export { AerostackClient as Aerostack } from './client';
 export * from './client';
 export * from './server';
 export * from './realtime';

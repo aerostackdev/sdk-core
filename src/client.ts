@@ -342,6 +342,95 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     }
 
     /**
+     * Stream an SSE response from any LLM endpoint with token-by-token callbacks.
+     *
+     * Pass the Fetch Response from an Aerostack gateway call (or any OpenAI-compatible
+     * endpoint), and Aerostack processes the SSE stream with billing-aware metering.
+     *
+     * ```typescript
+     * import { Aerostack } from '@aerostack/sdk';
+     * const ai = new Aerostack({ projectSlug: 'my-ai-product' });
+     * ai.gateway.setConsumerKey('ask_live_...');
+     *
+     * const response = await fetch('.../v1/chat/completions', { ... });
+     * await ai.stream(response, {
+     *   userId: 'user_123',
+     *   model: 'gpt-4o',
+     *   onToken: (delta) => process.stdout.write(delta),
+     * });
+     * ```
+     */
+    async stream(
+        response: Response,
+        opts: {
+            userId?: string;
+            model?: string;
+            onToken?: (delta: string) => void;
+            onDone?: (result: { text: string; tokensUsed: number }) => void;
+            onError?: (error: Error) => void;
+        } = {}
+    ): Promise<{ text: string; tokensUsed: number }> {
+        if (!response.ok || !response.body) {
+            const errData = await response.json().catch(() => ({ error: 'Request failed' })) as any;
+            const error = new Error(errData.error || `HTTP ${response.status}`);
+            opts.onError?.(error);
+            throw error;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let text = '';
+        let totalTokens = 0;
+        let estimatedTokens = 0;
+        let buffer = '';
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const payload = line.slice(6).trim();
+                    if (payload === '[DONE]') {
+                        reader.cancel();
+                        const result = { text, tokensUsed: totalTokens || estimatedTokens };
+                        opts.onDone?.(result);
+                        return result;
+                    }
+                    try {
+                        const parsed = JSON.parse(payload);
+                        const delta = parsed.choices?.[0]?.delta?.content;
+                        if (delta) {
+                            text += delta;
+                            estimatedTokens += Math.ceil(delta.length / 4);
+                            opts.onToken?.(delta);
+                        }
+                        if (parsed.usage?.total_tokens) totalTokens = parsed.usage.total_tokens;
+                        else if (parsed.usage?.completion_tokens) totalTokens = parsed.usage.completion_tokens;
+                    } catch {
+                        // Skip malformed SSE frames
+                    }
+                }
+            }
+        } catch (err: any) {
+            if (err.name !== 'AbortError') {
+                const error = err instanceof Error ? err : new Error(String(err));
+                opts.onError?.(error);
+                throw error;
+            }
+        }
+
+        const result = { text, tokensUsed: totalTokens || estimatedTokens };
+        opts.onDone?.(result);
+        return result;
+    }
+
+    /**
      * AI Gateway operations
      *
      * Provides consumer-facing access to gateway-proxied AI APIs:
@@ -455,6 +544,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                         if (!line.startsWith('data: ')) continue;
                         const payload = line.slice(6).trim();
                         if (payload === '[DONE]') {
+                            reader.cancel();
                             opts.onDone?.({ tokensUsed: totalTokens });
                             return;
                         }
