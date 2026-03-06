@@ -182,6 +182,71 @@ export class AerostackServer {
         return this.services.invoke(serviceName, { method, args }, { path: '/internal/hooks/rpc' });
     }
 
+    /**
+     * Call a platform storage RPC endpoint at {apiUrl}/v1/storage/{operation}.
+     * Used as fallback when no direct R2 binding is configured (platform storage model).
+     */
+    private async _storageApiCall(operation: string, body: FormData | Record<string, any>): Promise<Response> {
+        // Allowlist valid operations to prevent URL path traversal
+        const VALID_OPS: Record<string, ErrorCode> = {
+            upload: ErrorCode.STORAGE_UPLOAD_FAILED,
+            getUrl: ErrorCode.STORAGE_NOT_CONFIGURED,
+            get: ErrorCode.STORAGE_NOT_CONFIGURED,
+            delete: ErrorCode.STORAGE_DELETE_FAILED,
+            list: ErrorCode.STORAGE_DELETE_FAILED,
+            exists: ErrorCode.STORAGE_NOT_CONFIGURED,
+            getMetadata: ErrorCode.STORAGE_NOT_CONFIGURED,
+            copy: ErrorCode.STORAGE_UPLOAD_FAILED,
+            move: ErrorCode.STORAGE_UPLOAD_FAILED,
+        };
+        if (!(operation in VALID_OPS)) {
+            throw new StorageError(ErrorCode.STORAGE_UPLOAD_FAILED, `Invalid storage operation: ${operation}`, {});
+        }
+
+        // SSRF guard: parse URL and verify scheme + hostname explicitly
+        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerocall.ai';
+        let apiUrl: string;
+        try {
+            const u = new URL(rawUrl);
+            const isLocalhost = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+            apiUrl = (isLocalhost && u.protocol === 'http:') || u.protocol === 'https:'
+                ? rawUrl
+                : 'https://api.aerocall.ai';
+        } catch {
+            apiUrl = 'https://api.aerocall.ai';
+        }
+
+        const headers: Record<string, string> = {};
+        if (this._authToken) {
+            headers['Authorization'] = `Bearer ${this._authToken}`;
+        }
+
+        let fetchBody: BodyInit;
+        if (body instanceof FormData) {
+            fetchBody = body;
+            // Do NOT set Content-Type for FormData — fetch sets it with the boundary automatically
+        } else {
+            headers['Content-Type'] = 'application/json';
+            fetchBody = JSON.stringify(body);
+        }
+
+        const res = await fetch(`${apiUrl}/v1/storage/${operation}`, {
+            method: 'POST',
+            headers,
+            body: fetchBody,
+            signal: AbortSignal.timeout(25000),
+        });
+
+        if (!res.ok) {
+            const errText = await res.text();
+            let msg = `Storage ${operation} failed (${res.status})`;
+            if (res.status === 401) msg = 'Aerostack authentication failed. Check your AEROSTACK_API_KEY.';
+            throw new StorageError(VALID_OPS[operation], msg, { cause: errText });
+        }
+
+        return res;
+    }
+
     /** Parse RPC response as JSON; throw a clear error if body is not valid JSON (e.g. worker default handler returned plain text) */
     private async _parseRpcJson(res: Response, method: string, source: string): Promise<any> {
         const text = await res.text();
@@ -626,47 +691,79 @@ export class AerostackServer {
                 key: string,
                 options?: UploadOptions
             ): Promise<UploadResult> => {
-                if (!this._storage) {
-                    throw new StorageError(
-                        ErrorCode.STORAGE_NOT_CONFIGURED,
-                        'R2 storage not configured',
-                        {
-                            suggestion: 'Add [[r2_buckets]] binding to aerostack.toml',
-                        }
-                    );
+                // Direct R2 path (when developer has their own R2 binding)
+                if (this._storage) {
+                    try {
+                        const resolvedKey = this.resolveKey(key);
+                        await this._storage.put(resolvedKey, file, {
+                            httpMetadata: {
+                                contentType: options?.contentType,
+                                cacheControl: options?.cacheControl,
+                            },
+                            customMetadata: options?.metadata,
+                        });
+                        const obj = await this._storage.get(resolvedKey);
+                        const size = obj?.size || 0;
+                        return {
+                            key: resolvedKey,
+                            url: `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`,
+                            size,
+                            contentType: options?.contentType || 'application/octet-stream',
+                        };
+                    } catch (err: any) {
+                        const resolvedKey = this.resolveKey(key);
+                        throw new StorageError(
+                            ErrorCode.STORAGE_UPLOAD_FAILED,
+                            `Failed to upload file: ${resolvedKey}`,
+                            { suggestion: 'Check R2 bucket binding and file size limits', cause: err.message },
+                            { key }
+                        );
+                    }
                 }
 
+                // Platform storage path: call Aerostack RPC API
                 try {
+                    // Normalise file to a Blob so we can append to FormData
+                    let blob: Blob;
+                    if (typeof file === 'string') {
+                        blob = new Blob([file], { type: options?.contentType || 'text/plain' });
+                    } else if (file instanceof ArrayBuffer) {
+                        blob = new Blob([file], { type: options?.contentType || 'application/octet-stream' });
+                    } else if (ArrayBuffer.isView(file)) {
+                        blob = new Blob([file.buffer as ArrayBuffer], { type: options?.contentType || 'application/octet-stream' });
+                    } else {
+                        // ReadableStream — consume it first
+                        const reader = (file as ReadableStream<Uint8Array>).getReader();
+                        const chunks: Uint8Array[] = [];
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            if (value) chunks.push(value);
+                        }
+                        const total = chunks.reduce((s, c) => s + c.length, 0);
+                        const buf = new Uint8Array(total);
+                        let off = 0;
+                        for (const c of chunks) { buf.set(c, off); off += c.length; }
+                        blob = new Blob([buf], { type: options?.contentType || 'application/octet-stream' });
+                    }
+
                     const resolvedKey = this.resolveKey(key);
-                    await this._storage.put(resolvedKey, file, {
-                        httpMetadata: {
-                            contentType: options?.contentType,
-                            cacheControl: options?.cacheControl,
-                        },
-                        customMetadata: options?.metadata,
-                    });
+                    const formData = new FormData();
+                    formData.append('file', blob, resolvedKey.split('/').pop() || 'upload');
+                    formData.append('key', resolvedKey);
+                    if (options?.contentType) formData.append('contentType', options.contentType);
 
-                    // Get object to return size
-                    const obj = await this._storage.get(resolvedKey);
-                    const size = obj?.size || 0;
-
+                    const res = await this._storageApiCall('upload', formData);
+                    const data = await res.json<{ url: string }>();
                     return {
                         key: resolvedKey,
-                        url: `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`,
-                        size,
-                        contentType: options?.contentType || 'application/octet-stream',
+                        url: data.url,
+                        size: blob.size,
+                        contentType: options?.contentType || blob.type,
                     };
                 } catch (err: any) {
-                    const resolvedKey = this.resolveKey(key);
-                    throw new StorageError(
-                        ErrorCode.STORAGE_UPLOAD_FAILED,
-                        `Failed to upload file: ${resolvedKey}`,
-                        {
-                            suggestion: 'Check R2 bucket binding and file size limits',
-                            cause: err.message,
-                        },
-                        { key }
-                    );
+                    if (err instanceof StorageError) throw err;
+                    throw new StorageError(ErrorCode.STORAGE_UPLOAD_FAILED, `Failed to upload: ${key}`, { cause: err.message }, { key });
                 }
             },
 
@@ -674,85 +771,71 @@ export class AerostackServer {
              * Get presigned URL for object
              */
             getUrl: async (key: string, options?: UrlOptions): Promise<string> => {
-                if (!this._storage) {
-                    throw new StorageError(
-                        ErrorCode.STORAGE_NOT_CONFIGURED,
-                        'R2 storage not configured',
-                        {
-                            suggestion: 'Add [[r2_buckets]] binding to aerostack.toml',
-                        }
-                    );
+                if (this._storage) {
+                    const resolvedKey = this.resolveKey(key);
+                    return `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`;
                 }
 
+                // Platform storage: ask the API for the URL
                 const resolvedKey = this.resolveKey(key);
-
-                // For public buckets, return direct URL
-                return `https://${this.env.STORAGE_PUBLIC_URL || 'storage.aerostack.ai'}/${resolvedKey}`;
+                const res = await this._storageApiCall('getUrl', { key: resolvedKey });
+                const data = await res.json<{ url: string }>();
+                return data.url;
             },
 
             /**
              * Delete object from storage
              */
             delete: async (key: string): Promise<void> => {
-                if (!this._storage) {
-                    throw new StorageError(
-                        ErrorCode.STORAGE_NOT_CONFIGURED,
-                        'R2 storage not configured',
-                        {
-                            suggestion: 'Add [[r2_buckets]] binding to aerostack.toml',
-                        }
-                    );
+                if (this._storage) {
+                    try {
+                        const resolvedKey = this.resolveKey(key);
+                        await this._storage.delete(resolvedKey);
+                        return;
+                    } catch (err: any) {
+                        const resolvedKey = this.resolveKey(key);
+                        throw new StorageError(
+                            ErrorCode.STORAGE_DELETE_FAILED,
+                            `Failed to delete file: ${resolvedKey}`,
+                            { cause: err.message },
+                            { key }
+                        );
+                    }
                 }
 
-                try {
-                    const resolvedKey = this.resolveKey(key);
-                    await this._storage.delete(resolvedKey);
-                } catch (err: any) {
-                    const resolvedKey = this.resolveKey(key);
-                    throw new StorageError(
-                        ErrorCode.STORAGE_DELETE_FAILED,
-                        `Failed to delete file: ${resolvedKey}`,
-                        {
-                            cause: err.message,
-                        },
-                        { key }
-                    );
-                }
+                // Platform storage path
+                await this._storageApiCall('delete', { key: this.resolveKey(key) });
             },
 
             /**
              * List objects in storage
              */
             list: async (prefix?: string): Promise<StorageObject[]> => {
-                if (!this._storage) {
-                    throw new StorageError(
-                        ErrorCode.STORAGE_NOT_CONFIGURED,
-                        'R2 storage not configured',
-                        {
-                            suggestion: 'Add [[r2_buckets]] binding to aerostack.toml',
-                        }
-                    );
+                if (this._storage) {
+                    try {
+                        const resolvedPrefix = prefix ? this.resolveKey(prefix) : (this._projectId ? `projects/${this._projectId}/media/` : undefined);
+                        const listed = await this._storage.list({ prefix: resolvedPrefix });
+                        return listed.objects.map((obj) => ({
+                            key: obj.key,
+                            size: obj.size,
+                            uploaded: obj.uploaded,
+                            contentType: obj.httpMetadata?.contentType,
+                        }));
+                    } catch (err: any) {
+                        throw new StorageError(
+                            ErrorCode.STORAGE_DELETE_FAILED,
+                            'Failed to list storage objects',
+                            { cause: err.message },
+                            { prefix }
+                        );
+                    }
                 }
 
-                try {
-                    const resolvedPrefix = prefix ? this.resolveKey(prefix) : (this._projectId ? `projects/${this._projectId}/media/` : undefined);
-                    const listed = await this._storage.list({ prefix: resolvedPrefix });
-                    return listed.objects.map((obj) => ({
-                        key: obj.key,
-                        size: obj.size,
-                        uploaded: obj.uploaded,
-                        contentType: obj.httpMetadata?.contentType,
-                    }));
-                } catch (err: any) {
-                    throw new StorageError(
-                        ErrorCode.STORAGE_DELETE_FAILED,
-                        'Failed to list storage objects',
-                        {
-                            cause: err.message,
-                        },
-                        { prefix }
-                    );
-                }
+                // Platform storage path
+                const resolvedPrefix = prefix ? this.resolveKey(prefix) : undefined;
+                const res = await this._storageApiCall('list', { prefix: resolvedPrefix });
+                const data = await res.json<{ objects: StorageObject[] }>();
+                return data.objects ?? [];
             },
         };
     }
