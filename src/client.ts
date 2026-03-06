@@ -154,10 +154,18 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
 
         if (!response.ok) {
             const errorCode = this.mapErrorCode(data.code, response.status);
+            // Surface Zod validation field errors in the message so developers see what failed
+            let message = data.message || data.error || 'Auth request failed';
+            if (data.details?.fieldErrors) {
+                const fieldSummary = Object.entries(data.details.fieldErrors as Record<string, string[]>)
+                    .map(([field, errors]) => `${field}: ${errors.join(', ')}`)
+                    .join('; ');
+                if (fieldSummary) message = `${message} — ${fieldSummary}`;
+            }
             throw new ClientError(
                 errorCode,
-                data.message || data.error || 'Auth request failed',
-                { suggestion: this.getSuggestion(errorCode, data), field: data.field },
+                message,
+                { suggestion: this.getSuggestion(errorCode, data), field: data.field, details: data.details?.fieldErrors ? { fieldErrors: data.details.fieldErrors } : undefined },
                 response.status
             );
         }
@@ -174,7 +182,16 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                     throw new ValidationError('Invalid email address', 'email', 'Provide a valid email address');
                 }
                 if (!data.password || data.password.length < 8) {
-                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a stronger password with minimum 8 characters');
+                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a password with at least 8 characters, one uppercase letter, one lowercase letter, and one number');
+                }
+                if (!/[A-Z]/.test(data.password)) {
+                    throw new ValidationError('Password must contain at least one uppercase letter', 'password', 'Add an uppercase letter (A-Z) to your password');
+                }
+                if (!/[a-z]/.test(data.password)) {
+                    throw new ValidationError('Password must contain at least one lowercase letter', 'password', 'Add a lowercase letter (a-z) to your password');
+                }
+                if (!/[0-9]/.test(data.password)) {
+                    throw new ValidationError('Password must contain at least one number', 'password', 'Add a number (0-9) to your password');
                 }
                 return this._authRequest('/register', 'POST', {
                     email: data.email,
@@ -258,7 +275,16 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
                     throw new ValidationError('Reset token is required', 'token');
                 }
                 if (!newPassword || newPassword.length < 8) {
-                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a stronger password');
+                    throw new ValidationError('Password must be at least 8 characters', 'password', 'Use a password with at least 8 characters, one uppercase letter, one lowercase letter, and one number');
+                }
+                if (!/[A-Z]/.test(newPassword)) {
+                    throw new ValidationError('Password must contain at least one uppercase letter', 'password', 'Add an uppercase letter (A-Z) to your password');
+                }
+                if (!/[a-z]/.test(newPassword)) {
+                    throw new ValidationError('Password must contain at least one lowercase letter', 'password', 'Add a lowercase letter (a-z) to your password');
+                }
+                if (!/[0-9]/.test(newPassword)) {
+                    throw new ValidationError('Password must contain at least one number', 'password', 'Add a number (0-9) to your password');
                 }
                 return this._authRequest('/reset-password', 'POST', { token, newPassword });
             },

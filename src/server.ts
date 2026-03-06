@@ -392,6 +392,148 @@ export class AerostackServer {
                     return false;
                 }
             },
+
+            /**
+             * List cache keys with optional prefix (paginated)
+             */
+            list: async (prefix?: string, limit?: number, cursor?: string): Promise<{ keys: Array<{ name: string; expiration?: number }>; list_complete: boolean; cursor?: string }> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const result = await this._kv.list({ prefix, limit, cursor });
+                    return result as any;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_GET_FAILED, 'Failed to list cache keys', { cause: err.message });
+                }
+            },
+
+            /**
+             * Get all keys matching prefix (auto-paginates, hard cap 10k)
+             */
+            keys: async (prefix?: string): Promise<string[]> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const allKeys: string[] = [];
+                    let cursor: string | undefined;
+                    do {
+                        const result: any = await this._kv.list({ prefix, limit: 1000, cursor });
+                        for (const k of result.keys) allKeys.push(k.name);
+                        cursor = result.list_complete ? undefined : result.cursor;
+                        if (allKeys.length >= 10000) break;
+                    } while (cursor);
+                    return allKeys;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_GET_FAILED, 'Failed to list cache keys', { cause: err.message });
+                }
+            },
+
+            /**
+             * Get multiple keys in one call (up to 100)
+             */
+            getMany: async <T = any>(keys: string[]): Promise<Array<{ key: string; value: T | null }>> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const results = await Promise.all(
+                        keys.map(async (key) => ({ key, value: await this._kv!.get<T>(key, 'json') }))
+                    );
+                    return results;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_GET_FAILED, 'Failed to get many cache keys', { cause: err.message });
+                }
+            },
+
+            /**
+             * Set multiple key-value pairs in one call (up to 100)
+             */
+            setMany: async (entries: Array<{ key: string; value: any; ttl?: number }>): Promise<void> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    await Promise.all(
+                        entries.map((e) => this._kv!.put(e.key, JSON.stringify(e.value), e.ttl ? { expirationTtl: e.ttl } : undefined))
+                    );
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_SET_FAILED, 'Failed to set many cache keys', { cause: err.message });
+                }
+            },
+
+            /**
+             * Delete multiple keys in one call (up to 500)
+             */
+            deleteMany: async (keys: string[]): Promise<void> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    await Promise.all(keys.map((key) => this._kv!.delete(key)));
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_DELETE_FAILED, 'Failed to delete many cache keys', { cause: err.message });
+                }
+            },
+
+            /**
+             * Delete all keys matching prefix (or all project keys if no prefix). Hard cap 10k.
+             */
+            flush: async (prefix?: string): Promise<number> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const allKeys: string[] = [];
+                    let cursor: string | undefined;
+                    do {
+                        const result: any = await this._kv.list({ prefix, limit: 1000, cursor });
+                        for (const k of result.keys) allKeys.push(k.name);
+                        cursor = result.list_complete ? undefined : result.cursor;
+                        if (allKeys.length >= 10000) break;
+                    } while (cursor);
+                    await Promise.all(allKeys.map((key) => this._kv!.delete(key)));
+                    return allKeys.length;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_DELETE_FAILED, 'Failed to flush cache', { cause: err.message });
+                }
+            },
+
+            /**
+             * Update TTL of an existing key (get-then-put, not atomic)
+             */
+            expire: async (key: string, ttl: number): Promise<boolean> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const raw = await this._kv.get(key, 'text');
+                    if (raw === null) return false;
+                    await this._kv.put(key, raw, { expirationTtl: ttl });
+                    return true;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_SET_FAILED, `Failed to expire cache key: ${key}`, { cause: err.message });
+                }
+            },
+
+            /**
+             * Increment a numeric counter (read-modify-write, not atomic under high concurrency)
+             */
+            increment: async (key: string, amount = 1, initialValue = 0, ttl?: number): Promise<number> => {
+                if (!this._kv) {
+                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                }
+                try {
+                    const raw = await this._kv.get(key, 'text');
+                    const current = raw !== null ? parseFloat(raw) : initialValue;
+                    const next = current + amount;
+                    await this._kv.put(key, String(next), ttl ? { expirationTtl: ttl } : undefined);
+                    return next;
+                } catch (err: any) {
+                    throw new CacheError(ErrorCode.CACHE_SET_FAILED, `Failed to increment cache key: ${key}`, { cause: err.message });
+                }
+            },
         };
     }
 
@@ -1113,15 +1255,17 @@ export class AerostackServer {
             throw new DatabaseError(ErrorCode.DB_CONNECTION_FAILED, 'D1 not configured');
         }
 
+        // D1 blocks sqlite_master (SQLITE_AUTH). Use pragma_table_list() instead (SQLite 3.37+, supported in D1).
+        // _cf_% tables are internal Cloudflare D1 system tables — exclude them.
         const result = await this._d1
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .prepare("SELECT name FROM pragma_table_list() WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'")
             .all();
 
         const tables: SchemaTable[] = [];
 
         for (const row of result.results as any[]) {
             const tableName = row.name;
-            const columns = await this._d1.prepare(`PRAGMA table_info(${tableName})`).all();
+            const columns = await this._d1.prepare(`SELECT * FROM pragma_table_info(?)`).bind(tableName).all();
 
             tables.push({
                 name: tableName,

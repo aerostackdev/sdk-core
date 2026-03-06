@@ -30,6 +30,7 @@ export interface ClientErrorDetails {
     suggestion?: string;
     field?: string;
     recoveryAction?: string;
+    details?: Record<string, any>;
 }
 
 /**
