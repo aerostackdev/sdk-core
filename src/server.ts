@@ -264,6 +264,7 @@ export class AerostackServer {
         // Allowlist valid operations to prevent URL path traversal
         const VALID_PATHS = new Set([
             'chat',
+            'embed',
             'search/ingest',
             'search/query',
             'search/delete',
@@ -987,13 +988,12 @@ export class AerostackServer {
              */
             embed: async (text: string, options?: EmbedOptions): Promise<Embedding> => {
                 if (!self._ai) {
-                    throw new AIError(
-                        ErrorCode.AI_NOT_CONFIGURED,
-                        'AI binding not configured. Add [ai] to your aerostack.toml to enable direct AI embedding.',
-                        {
-                            suggestion: 'Add [ai] binding = "AI" to your aerostack.toml, or use sdk.ai.search.ingest/query which handle embeddings server-side automatically.',
-                        }
-                    );
+                    // RPC fallback — platform handles the AI binding (same pattern as generate/chat)
+                    const result = await self._aiApiCall('embed', {
+                        text,
+                        model: options?.model || '@cf/baai/bge-base-en-v1.5',
+                    });
+                    return { embedding: result.embedding, model: result.model };
                 }
 
                 try {
