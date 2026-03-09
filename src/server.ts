@@ -148,7 +148,7 @@ export class AerostackServer {
         }
 
         // 2. Try HTTP URL if available (default: production API)
-        const apiUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerocall.ai';
+        const apiUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
         if (serviceName === 'internal' && apiUrl) {
             try {
                 const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
@@ -204,16 +204,16 @@ export class AerostackServer {
         }
 
         // SSRF guard: parse URL and verify scheme + hostname explicitly
-        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerocall.ai';
+        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
         let apiUrl: string;
         try {
             const u = new URL(rawUrl);
             const isLocalhost = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
             apiUrl = (isLocalhost && u.protocol === 'http:') || u.protocol === 'https:'
                 ? rawUrl
-                : 'https://api.aerocall.ai';
+                : 'https://api.aerostack.dev';
         } catch {
-            apiUrl = 'https://api.aerocall.ai';
+            apiUrl = 'https://api.aerostack.dev';
         }
 
         const headers: Record<string, string> = {};
@@ -282,7 +282,7 @@ export class AerostackServer {
         // SSRF guard: parse URL and verify scheme + hostname explicitly
         // Allow https:// (any host) or http://localhost|127.0.0.1 (local dev only).
         // Reject http:// to private RFC-1918/IPv6 ranges.
-        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerocall.ai';
+        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
         let apiUrl: string;
         try {
             const u = new URL(rawUrl);
@@ -299,9 +299,9 @@ export class AerostackServer {
             const allowed =
                 u.protocol === 'https:' ||
                 (u.protocol === 'http:' && isLocalDev && !isPrivate);
-            apiUrl = allowed ? rawUrl : 'https://api.aerocall.ai';
+            apiUrl = allowed ? rawUrl : 'https://api.aerostack.dev';
         } catch {
-            apiUrl = 'https://api.aerocall.ai';
+            apiUrl = 'https://api.aerostack.dev';
         }
 
         const headers: Record<string, string> = {
@@ -339,7 +339,7 @@ export class AerostackServer {
             throw new Error(
                 `Failed to communicate with Aerostack API at ${source}. ` +
                 `This usually means your AEROSTACK_API_URL points to the wrong service (like your own worker) or the API is unavailable. ` +
-                `Ensure AEROSTACK_API_URL is set to a valid Aerostack API (e.g., https://api.aerocall.ai). ` +
+                `Ensure AEROSTACK_API_URL is set to a valid Aerostack API (e.g., https://api.aerostack.dev). ` +
                 `[Internal: ${method} expected JSON, received "${preview}"]`
             );
         }

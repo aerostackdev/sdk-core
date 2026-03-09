@@ -1,5 +1,6 @@
 import { ClientError, ClientErrorCode, AuthenticationError, ValidationError, NetworkError } from './client-errors';
 import { RealtimeClient, RealtimeEvent, RealtimeCallback } from './realtime';
+import { DEFAULT_API_URL } from './config';
 
 export interface SDKConfig {
     projectSlug: string;
@@ -116,7 +117,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     constructor(config: SDKConfig) {
         this.projectSlug = config.projectSlug;
         this.projectId = config.projectId;
-        this.baseUrl = config.baseUrl || 'https://api.aerocall.ai/v1';
+        this.baseUrl = config.baseUrl || DEFAULT_API_URL;
         this.apiKey = config.apiKey;
     }
 
@@ -128,7 +129,7 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
      * Derives from baseUrl by stripping the /v1 suffix and using the full API path.
      */
     private get _authBase(): string {
-        // e.g. https://api.aerocall.ai/v1 → https://api.aerocall.ai/api/v1/public/projects/slug
+        // e.g. https://api.aerostack.dev/v1 → https://api.aerostack.dev/api/v1/public/projects/slug
         const host = this.baseUrl.replace(/\/v1\/?$/, '');
         return `${host}/api/v1/public/projects/${this.projectSlug}/auth`;
     }

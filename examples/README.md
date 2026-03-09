@@ -23,7 +23,7 @@ npm install @aerostack/sdk
 ```bash
 # Set environment variables
 export PROJECT_SLUG=your-project-slug
-export API_URL=https://api.aerocall.ai/v1
+export API_URL=https://api.aerostack.dev/v1
 
 # Run with ts-node
 npx ts-node examples/basic-auth.ts

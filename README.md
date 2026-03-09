@@ -77,7 +77,7 @@ import { AerostackClient } from '@aerostack/sdk';
 
 const client = new AerostackClient({
   projectSlug: 'my-project',
-  baseUrl: 'https://api.aerocall.ai/v1' // optional
+  baseUrl: 'https://api.aerostack.dev/v1' // optional
 });
 
 // Register user
@@ -224,7 +224,7 @@ export default {
     const client = new AerostackClient({
       projectSlug: "my-project",
       // apiKey: env.ADMIN_API_KEY, // Optional: Admin privileges
-      baseUrl: env.API_URL || 'https://api.aerocall.ai/v1'
+      baseUrl: env.API_URL || 'https://api.aerostack.dev/v1'
     });
 
     const server = new AerostackServer(env);
@@ -352,7 +352,7 @@ bucket_name = "my-bucket"
 ```typescript
 const client = new AerostackClient({
   projectSlug: 'my-project',        // Required
-  baseUrl: 'https://api.aerocall.ai/v1' // Optional, defaults to production
+  baseUrl: 'https://api.aerostack.dev/v1' // Optional, defaults to production
 });
 ```
 
