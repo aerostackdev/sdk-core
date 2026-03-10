@@ -83,6 +83,7 @@ export class RealtimeSubscription<T = any> {
         });
         this.isSubscribed = false;
         this.callbacks.clear();
+        this.client._removeSubscription(this.topic);
     }
 
     // ─── Phase 1: Pub/Sub — Publish custom events ─────────────────────────
@@ -224,13 +225,13 @@ export class RealtimeClient {
             const url = new URL(this.baseUrl);
             url.searchParams.set('projectId', this.projectId);
             if (this.userId) url.searchParams.set('userId', this.userId);
-            if (this.token) url.searchParams.set('token', this.token);
 
-            // SECURITY: Pass API key via Sec-WebSocket-Protocol header only
+            // SECURITY: Pass credentials via Sec-WebSocket-Protocol header — never as URL query params
+            // (URL params appear in CDN logs, browser history, and Referer headers).
             const protocols: string[] = [];
-            if (this.apiKey) {
-                protocols.push(`aerostack-key.${this.apiKey}`);
-            }
+            if (this.apiKey) protocols.push(`aerostack-key.${this.apiKey}`);
+            if (this.token) protocols.push(`aerostack-token.${this.token}`);
+            if (protocols.length > 0) protocols.push('aerostack-v1');
 
             this.ws = protocols.length > 0
                 ? new WebSocket(url.toString(), protocols)
@@ -318,6 +319,11 @@ export class RealtimeClient {
     /** @internal — Generate unique message ID for ack tracking */
     _generateId(): string {
         return Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+
+    /** @internal — Remove a subscription from the map (called on unsubscribe) */
+    _removeSubscription(topic: string): void {
+        this.subscriptions.delete(topic);
     }
 
     /** @internal */
