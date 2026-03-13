@@ -458,6 +458,36 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
     }
 
     /**
+     * Create a slug-bound gateway API client for simpler chat interactions.
+     *
+     * ```typescript
+     * const gw = client.chatApi('my-chatbot');
+     *
+     * // Non-streaming
+     * const { content } = await gw.chat({ message: 'Hello' });
+     *
+     * // Streaming
+     * await gw.chat({
+     *   message: 'Tell me a story',
+     *   stream: true,
+     *   onToken: (delta) => process.stdout.write(delta),
+     * });
+     *
+     * // With history
+     * await gw.chat({
+     *   message: 'Follow up question',
+     *   history: [
+     *     { role: 'user', content: 'Hello' },
+     *     { role: 'assistant', content: 'Hi there!' },
+     *   ],
+     * });
+     * ```
+     */
+    chatApi(apiSlug: string): AerostackGatewayApi {
+        return new AerostackGatewayApi(this, apiSlug);
+    }
+
+    /**
      * AI Gateway operations
      *
      * Provides consumer-facing access to gateway-proxied AI APIs:
@@ -975,6 +1005,95 @@ export class AerostackClient<T extends DefaultProjectSchema = DefaultProjectSche
             default:
                 return data?.details?.suggestion || 'Please try again or contact support';
         }
+    }
+}
+
+// ─── Slug-bound Gateway API ──────────────────────────────────────────────────
+
+export interface ChatMessage {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+}
+
+export interface GatewayChatOptions {
+    /** The user message to send. */
+    message: string;
+    /** Previous conversation history. */
+    history?: ChatMessage[];
+    /** Model override (if the gateway supports model selection). */
+    model?: string;
+    /** Enable streaming. When true, onToken is called for each delta. */
+    stream?: boolean;
+    /** Called for each token delta during streaming. Required when stream=true. */
+    onToken?: (delta: string) => void;
+    /** Called when streaming finishes with usage info. */
+    onDone?: (usage: { tokensUsed: number }) => void;
+}
+
+export interface GatewayChatResponse {
+    content: string;
+    tokensUsed: number;
+}
+
+/**
+ * A slug-bound gateway API client that provides a simple chat() interface.
+ *
+ * Created via `client.chatApi('my-chatbot-slug')`.
+ */
+export class AerostackGatewayApi {
+    constructor(
+        private client: AerostackClient,
+        private apiSlug: string,
+    ) {}
+
+    /**
+     * Send a chat message. Supports both streaming and non-streaming modes.
+     *
+     * Non-streaming (default): returns `{ content, tokensUsed }`
+     * Streaming: calls `onToken` for each delta, then `onDone` with usage.
+     */
+    async chat(opts: GatewayChatOptions): Promise<GatewayChatResponse> {
+        const messages: ChatMessage[] = [
+            ...(opts.history ?? []),
+            { role: 'user', content: opts.message },
+        ];
+
+        if (opts.stream) {
+            let fullContent = '';
+            let totalTokens = 0;
+
+            await this.client.gateway.stream({
+                apiSlug: this.apiSlug,
+                messages,
+                model: opts.model,
+                onToken: (delta) => {
+                    fullContent += delta;
+                    opts.onToken?.(delta);
+                },
+                onDone: (usage) => {
+                    totalTokens = usage.tokensUsed;
+                    opts.onDone?.(usage);
+                },
+            });
+
+            return { content: fullContent, tokensUsed: totalTokens };
+        }
+
+        return this.client.gateway.complete({
+            apiSlug: this.apiSlug,
+            messages,
+            model: opts.model,
+        });
+    }
+
+    /** Get usage stats for this API. */
+    async usage(days?: number): Promise<GatewayUsageSummary> {
+        return this.client.gateway.usage(this.apiSlug, days);
+    }
+
+    /** Get wallet balance for this API. */
+    async wallet(): Promise<GatewayWallet> {
+        return this.client.gateway.wallet(this.apiSlug);
     }
 }
 
