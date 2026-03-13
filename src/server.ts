@@ -160,6 +160,7 @@ export class AerostackServer {
                     const errText = await res.text();
                     let errMsg = `Aerostack connection error (${res.status})`;
                     if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY.";
+                    if (res.status === 403) errMsg = "RPC endpoints require a secret API key. Public keys cannot access db/cache/storage/ai. Set AEROSTACK_API_KEY to your secret key.";
                     if (res.status === 404) errMsg = `Aerostack resource not found at ${apiUrl}. Check your AEROSTACK_API_URL.`;
                     throw new Error(`${errMsg} [Internal: HTTP ${method} ${res.status}] ${errText}`);
                 }
@@ -241,6 +242,8 @@ export class AerostackServer {
             const errText = await res.text();
             let msg = `Storage ${operation} failed (${res.status})`;
             if (res.status === 401) msg = 'Aerostack authentication failed. Check your AEROSTACK_API_KEY.';
+            if (res.status === 403) msg = 'Storage requires a secret API key. Public keys cannot access RPC endpoints. Set AEROSTACK_API_KEY to your secret key (starts with "sk_" or found in your dashboard under API Keys > Secret).';
+            if (res.status === 415) msg = 'Storage upload rejected: server expected multipart/form-data. This is a platform bug — please report it.';
             throw new StorageError(VALID_OPS[operation], msg, { cause: errText });
         }
 
