@@ -721,9 +721,9 @@ export class AerostackServer {
                 if (!this._queue) {
                     // Fallback to RPC for managed environments without direct queue binding
                     try {
-                        await this._rpcCall('internal', 'queue.enqueue', [job.type, job.data]);
+                        const rpcResult = await this._rpcCall('internal', 'queue.enqueue', [job.type, job.data, job.delay]) as any;
                         return {
-                            jobId: `rpc_${Date.now()}`,
+                            jobId: rpcResult?.jobId || `rpc_${Date.now()}`,
                             status: 'queued',
                             queuedAt: new Date()
                         };
@@ -750,7 +750,6 @@ export class AerostackServer {
                         delaySeconds: job.delay,
                     });
 
-                    // Generate job ID (in production, use queue message ID)
                     const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
                     return {
@@ -768,6 +767,39 @@ export class AerostackServer {
                         },
                         { job }
                     );
+                }
+            },
+
+            /**
+             * Get a job's status by ID
+             */
+            getJob: async (jobId: string): Promise<{ job: JobStatus | null; exists: boolean }> => {
+                try {
+                    return await this._rpcCall('internal', 'queue.job', [jobId]) as any;
+                } catch (err: any) {
+                    throw new QueueError(ErrorCode.QUEUE_NOT_CONFIGURED, `Failed to get job: ${err.message}`, { cause: err.message });
+                }
+            },
+
+            /**
+             * List jobs with optional status/type filters
+             */
+            listJobs: async (options?: { status?: string; type?: string; limit?: number; cursor?: string }): Promise<{ jobs: JobStatus[]; list_complete: boolean; cursor?: string }> => {
+                try {
+                    return await this._rpcCall('internal', 'queue.jobs', [options || {}]) as any;
+                } catch (err: any) {
+                    throw new QueueError(ErrorCode.QUEUE_NOT_CONFIGURED, `Failed to list jobs: ${err.message}`, { cause: err.message });
+                }
+            },
+
+            /**
+             * Cancel a queued job (advisory — running jobs will be skipped on next check)
+             */
+            cancelJob: async (jobId: string): Promise<{ success: boolean; note?: string }> => {
+                try {
+                    return await this._rpcCall('internal', 'queue.cancel', [jobId]) as any;
+                } catch (err: any) {
+                    throw new QueueError(ErrorCode.QUEUE_NOT_CONFIGURED, `Failed to cancel job: ${err.message}`, { cause: err.message });
                 }
             },
         };
