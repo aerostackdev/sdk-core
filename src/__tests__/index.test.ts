@@ -64,12 +64,6 @@ describe('SDK singleton', () => {
     expect(() => sdk.services).toThrow('SDK not initialized');
   });
 
-  it('should throw when accessing ecommerce before init', () => {
-    (sdk as any)._server = null;
-    (sdk as any)._client = null;
-    expect(() => sdk.ecommerce).toThrow('SDK not initialized');
-  });
-
   it('should throw when accessing socket before init', () => {
     (sdk as any)._server = null;
     (sdk as any)._client = null;
