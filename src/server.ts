@@ -8,7 +8,6 @@ import {
     ServiceError,
     ErrorCode,
 } from './server-errors';
-import { EcommerceService } from './ecommerce';
 import type {
     DatabaseResponse,
     RoutingRules,
@@ -70,6 +69,8 @@ export class AerostackServer {
     private _projectId?: string;
     private _authToken?: string;
     private _hookId?: string;
+    private _dispatchToken?: string;
+    private _platformUrl?: string;
     private routingRules: RoutingRules;
     private env: AerostackEnv;
 
@@ -100,9 +101,19 @@ export class AerostackServer {
         this._ai = env.AI;
         this._dispatcher = env.DISPATCHER;
         this.routingRules = options.routing || { tables: {} };
-        this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID;
-        this._authToken = options.authToken || env.AEROSTACK_API_KEY;
         this._hookId = options.hookId || '';
+
+        // Bootstrap auth from x-as-* dispatch headers ONLY when env bindings are
+        // genuinely empty (dispatch namespace scenario). This prevents external callers
+        // from injecting these headers to spoof auth context.
+        const req = options.request;
+        const envIsEmpty = !env.AEROSTACK_PROJECT_ID && !env.AEROSTACK_API_KEY && !env.DB && !env.CACHE;
+        this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID
+            || (envIsEmpty ? req?.headers?.get('x-as-project-id') : undefined) || undefined;
+        this._authToken = options.authToken || env.AEROSTACK_API_KEY
+            || (envIsEmpty ? req?.headers?.get('x-as-service-token') : undefined) || undefined;
+        this._dispatchToken = (envIsEmpty ? req?.headers?.get('x-as-dispatch-token') : undefined) || undefined;
+        this._platformUrl = (envIsEmpty ? req?.headers?.get('x-as-platform-url') : undefined) || undefined;
 
         // Storage initialization logic
         if (options.storage) {
@@ -116,8 +127,7 @@ export class AerostackServer {
             this._storage = env.STORAGE;
         }
 
-        // Project ID for storage isolation
-        this._projectId = options.projectId || env.AEROSTACK_PROJECT_ID;
+        // Project ID for storage isolation (already set above with header fallback)
 
         // Async init for dynamic dependencies
         this._initPromise = this.initPostgres(env);
@@ -128,7 +138,12 @@ export class AerostackServer {
             'Content-Type': 'application/json'
         };
 
-        if (this._authToken) {
+        // Auth: prefer dispatch token (injected by platform at invocation time),
+        // then API key (set in env or via x-as-service-token header)
+        if (this._dispatchToken && this._projectId) {
+            headers['x-as-dispatch-token'] = this._dispatchToken;
+            headers['x-as-project-id'] = this._projectId;
+        } else if (this._authToken) {
             headers['Authorization'] = `Bearer ${this._authToken}`;
         }
 
@@ -147,9 +162,19 @@ export class AerostackServer {
             return this._parseRpcJson(res, method, 'Service Binding');
         }
 
-        // 2. Try HTTP URL if available (default: production API)
-        const apiUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
-        if (serviceName === 'internal' && apiUrl) {
+        // 2. Try HTTP URL: platform URL from dispatch headers → env vars → hardcoded default
+        // SSRF guard: validate URL scheme + hostname (same pattern as _storageApiCall)
+        const rawApiUrl = this._platformUrl || this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
+        let apiUrl: string;
+        try {
+            const u = new URL(rawApiUrl);
+            const isLocalDev = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+            const allowed = u.protocol === 'https:' || (u.protocol === 'http:' && isLocalDev);
+            apiUrl = allowed ? rawApiUrl : 'https://api.aerostack.dev';
+        } catch {
+            apiUrl = 'https://api.aerostack.dev';
+        }
+        if (serviceName === 'internal') {
             try {
                 const res = await fetch(`${apiUrl}/internal/hooks/rpc`, {
                     method: 'POST',
@@ -159,7 +184,7 @@ export class AerostackServer {
                 if (!res.ok) {
                     const errText = await res.text();
                     let errMsg = `Aerostack connection error (${res.status})`;
-                    if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY.";
+                    if (res.status === 401) errMsg = "Aerostack authentication failed. Check your AEROSTACK_API_KEY or dispatch token.";
                     if (res.status === 403) errMsg = "RPC endpoints require a secret API key. Public keys cannot access db/cache/storage/ai. Set AEROSTACK_API_KEY to your secret key.";
                     if (res.status === 404) errMsg = `Aerostack resource not found at ${apiUrl}. Check your AEROSTACK_API_URL.`;
                     throw new Error(`${errMsg} [Internal: HTTP ${method} ${res.status}] ${errText}`);
@@ -205,7 +230,7 @@ export class AerostackServer {
         }
 
         // SSRF guard: parse URL and verify scheme + hostname explicitly
-        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
+        const rawUrl = this._platformUrl || this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
         let apiUrl: string;
         try {
             const u = new URL(rawUrl);
@@ -218,7 +243,11 @@ export class AerostackServer {
         }
 
         const headers: Record<string, string> = {};
-        if (this._authToken) {
+        // Auth: dispatch token or API key
+        if (this._dispatchToken && this._projectId) {
+            headers['x-as-dispatch-token'] = this._dispatchToken;
+            headers['x-as-project-id'] = this._projectId;
+        } else if (this._authToken) {
             headers['Authorization'] = `Bearer ${this._authToken}`;
         }
 
@@ -255,8 +284,8 @@ export class AerostackServer {
      * Used as fallback when no direct AI binding is configured (platform model).
      */
     private async _aiApiCall(path: string, body?: Record<string, any>, method: 'POST' | 'GET' = 'POST'): Promise<any> {
-        // Pre-flight: require auth token when using RPC path (no direct binding)
-        if (!this._authToken) {
+        // Pre-flight: require auth token or dispatch token when using RPC path
+        if (!this._authToken && !this._dispatchToken) {
             throw new AIError(
                 ErrorCode.AI_REQUEST_FAILED,
                 'AEROSTACK_API_KEY is required for platform AI operations. Set it in your environment or pass authToken in options.',
@@ -285,7 +314,7 @@ export class AerostackServer {
         // SSRF guard: parse URL and verify scheme + hostname explicitly
         // Allow https:// (any host) or http://localhost|127.0.0.1 (local dev only).
         // Reject http:// to private RFC-1918/IPv6 ranges.
-        const rawUrl = this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
+        const rawUrl = this._platformUrl || this.env.API_URL || this.env.AEROSTACK_API_URL || 'https://api.aerostack.dev';
         let apiUrl: string;
         try {
             const u = new URL(rawUrl);
@@ -307,9 +336,14 @@ export class AerostackServer {
             apiUrl = 'https://api.aerostack.dev';
         }
 
-        const headers: Record<string, string> = {
-            'Authorization': `Bearer ${this._authToken}`,
-        };
+        const headers: Record<string, string> = {};
+        // Auth: dispatch token or API key
+        if (this._dispatchToken && this._projectId) {
+            headers['x-as-dispatch-token'] = this._dispatchToken;
+            headers['x-as-project-id'] = this._projectId;
+        } else if (this._authToken) {
+            headers['Authorization'] = `Bearer ${this._authToken}`;
+        }
         if (method !== 'GET') {
             headers['Content-Type'] = 'application/json';
         }
@@ -324,7 +358,7 @@ export class AerostackServer {
         if (!res.ok) {
             const errText = await res.text();
             let msg = `AI ${path} failed (${res.status})`;
-            if (res.status === 401) msg = 'Aerostack authentication failed. Check your AEROSTACK_API_KEY.';
+            if (res.status === 401) msg = 'Aerostack authentication failed. Check your AEROSTACK_API_KEY or dispatch token.';
             if (res.status === 403) msg = 'API key does not have permission for AI operations. Check your key scopes.';
             throw new AIError(ErrorCode.AI_REQUEST_FAILED, msg, { cause: errText });
         }
@@ -436,18 +470,11 @@ export class AerostackServer {
              */
             get: async <T = any>(key: string, options?: CacheGetOptions): Promise<T | null> => {
                 if (!this._kv) {
-                    throw new CacheError(
-                        ErrorCode.CACHE_NOT_CONFIGURED,
-                        'KV cache not configured',
-                        {
-                            suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml',
-                        }
-                    );
+                    return this._rpcCall('internal', 'cache.get', [key]) as Promise<T | null>;
                 }
 
                 try {
                     const type = options?.type || 'json';
-                    // Type assertion needed for KV get with different types
                     const value = type === 'json'
                         ? await this._kv.get(key, 'json')
                         : type === 'text'
@@ -474,13 +501,9 @@ export class AerostackServer {
              */
             set: async (key: string, value: any, options?: CacheOptions): Promise<void> => {
                 if (!this._kv) {
-                    throw new CacheError(
-                        ErrorCode.CACHE_NOT_CONFIGURED,
-                        'KV cache not configured',
-                        {
-                            suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml',
-                        }
-                    );
+                    const ttl = options?.ttl || options?.expirationTtl;
+                    await this._rpcCall('internal', 'cache.set', [key, value, ttl]);
+                    return;
                 }
 
                 try {
@@ -504,13 +527,8 @@ export class AerostackServer {
              */
             delete: async (key: string): Promise<void> => {
                 if (!this._kv) {
-                    throw new CacheError(
-                        ErrorCode.CACHE_NOT_CONFIGURED,
-                        'KV cache not configured',
-                        {
-                            suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml',
-                        }
-                    );
+                    await this._rpcCall('internal', 'cache.delete', [key]);
+                    return;
                 }
 
                 try {
@@ -519,9 +537,7 @@ export class AerostackServer {
                     throw new CacheError(
                         ErrorCode.CACHE_DELETE_FAILED,
                         `Failed to delete cache key: ${key}`,
-                        {
-                            cause: err.message,
-                        },
+                        { cause: err.message },
                         { key }
                     );
                 }
@@ -532,7 +548,8 @@ export class AerostackServer {
              */
             exists: async (key: string): Promise<boolean> => {
                 if (!this._kv) {
-                    return false;
+                    const val = await this._rpcCall('internal', 'cache.get', [key]);
+                    return val !== null && val !== undefined;
                 }
 
                 try {
@@ -548,7 +565,7 @@ export class AerostackServer {
              */
             list: async (prefix?: string, limit?: number, cursor?: string): Promise<{ keys: Array<{ name: string; expiration?: number }>; list_complete: boolean; cursor?: string }> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    return this._rpcCall('internal', 'cache.list', [prefix, { limit, cursor }]) as any;
                 }
                 try {
                     const result = await this._kv.list({ prefix, limit, cursor });
@@ -563,7 +580,7 @@ export class AerostackServer {
              */
             keys: async (prefix?: string): Promise<string[]> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    return this._rpcCall('internal', 'cache.keys', [prefix]) as Promise<string[]>;
                 }
                 try {
                     const allKeys: string[] = [];
@@ -585,7 +602,7 @@ export class AerostackServer {
              */
             getMany: async <T = any>(keys: string[]): Promise<Array<{ key: string; value: T | null }>> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    return this._rpcCall('internal', 'cache.getMany', [keys]) as any;
                 }
                 try {
                     const results = await Promise.all(
@@ -602,7 +619,8 @@ export class AerostackServer {
              */
             setMany: async (entries: Array<{ key: string; value: any; ttl?: number }>): Promise<void> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    await this._rpcCall('internal', 'cache.setMany', [entries]);
+                    return;
                 }
                 try {
                     await Promise.all(
@@ -618,7 +636,8 @@ export class AerostackServer {
              */
             deleteMany: async (keys: string[]): Promise<void> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    await this._rpcCall('internal', 'cache.deleteMany', [keys]);
+                    return;
                 }
                 try {
                     await Promise.all(keys.map((key) => this._kv!.delete(key)));
@@ -632,7 +651,8 @@ export class AerostackServer {
              */
             flush: async (prefix?: string): Promise<number> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    const result = await this._rpcCall('internal', 'cache.flush', [prefix]) as any;
+                    return result?.deleted ?? 0;
                 }
                 try {
                     const allKeys: string[] = [];
@@ -655,7 +675,8 @@ export class AerostackServer {
              */
             expire: async (key: string, ttl: number): Promise<boolean> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    const result = await this._rpcCall('internal', 'cache.expire', [key, ttl]) as any;
+                    return result?.success ?? false;
                 }
                 try {
                     const raw = await this._kv.get(key, 'text');
@@ -672,7 +693,8 @@ export class AerostackServer {
              */
             increment: async (key: string, amount = 1, initialValue = 0, ttl?: number): Promise<number> => {
                 if (!this._kv) {
-                    throw new CacheError(ErrorCode.CACHE_NOT_CONFIGURED, 'KV cache not configured', { suggestion: 'Add [[kv_namespaces]] binding to aerostack.toml' });
+                    const result = await this._rpcCall('internal', 'cache.increment', [key, amount, { initialValue, ttl }]) as any;
+                    return result?.value ?? 0;
                 }
                 try {
                     const raw = await this._kv.get(key, 'text');
@@ -1262,34 +1284,6 @@ export class AerostackServer {
     }
 
     /**
-     * Ecommerce operations
-     */
-    get ecommerce() {
-        if (!this._projectId) {
-            throw new Error('Project ID required for ecommerce operations. Pass projectId in sdk.init() options.');
-        }
-        const service = new EcommerceService(this.env, this._projectId);
-        return {
-            products: {
-                list: (options: any) => service.listProducts(options),
-                get: (id: string) => service.getProduct(id)
-            },
-            orders: {
-                list: (options: any) => service.listOrders(options),
-                get: (id: string) => service.getOrder(id),
-                create: (data: any) => service.createOrder(data)
-            },
-            customers: {
-                list: (options: any) => service.listCustomers(options),
-                get: (id: string) => service.getCustomer(id)
-            },
-            analytics: {
-                getStats: (period?: string) => service.getStats(period)
-            }
-        };
-    }
-
-    /**
      * Realtime Socket operations
      */
     get socket() {
@@ -1415,13 +1409,19 @@ export class AerostackServer {
             }
         }
 
-        throw new DatabaseError(
-            ErrorCode.DB_CONNECTION_FAILED,
-            'No database connection available',
-            {
-                suggestion: 'Configure DB or Postgres connection in aerostack.toml',
-            }
-        );
+        // Fallback to RPC when no direct DB binding is available (dispatch namespace)
+        try {
+            const result = await this._rpcCall('internal', 'db.query', [sql, params]);
+            return result as DatabaseResponse<T>;
+        } catch (err: any) {
+            throw new DatabaseError(
+                ErrorCode.DB_CONNECTION_FAILED,
+                `Database query failed via RPC: ${err.message}`,
+                {
+                    suggestion: 'Ensure the platform API is reachable and auth is configured',
+                }
+            );
+        }
     }
 
     private determineTarget(sql: string): 'd1' | 'postgres' {

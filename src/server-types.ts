@@ -25,6 +25,8 @@ export interface AerostackOptions {
     projectId?: string;
     authToken?: string;
     hookId?: string;
+    /** Pass the incoming Request so the SDK can read x-as-* dispatch headers for auth bootstrap */
+    request?: Request;
 }
 
 export interface SchemaColumn {
