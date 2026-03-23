@@ -263,7 +263,7 @@ export default {
 ### When to Use This Pattern
 
 ✅ **Use dual-mode when**:
-- Building API wrappers around Aerostack's Auth/E-commerce
+- Building API wrappers around Aerostack's Auth
 - Adding custom business logic to Auth flows
 - Combining public API calls with direct DB operations
 - Creating admin endpoints that need both Auth verification and DB access

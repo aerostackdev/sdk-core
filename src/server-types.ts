@@ -257,7 +257,7 @@ export interface AuthHookResult {
 
 export interface AerostackEnv {
     DB?: D1Database;
-    DB_ECOMMERCE?: D1Database;
+
     CACHE?: KVNamespace;
     QUEUE?: Queue;
     MEDIA?: R2Bucket;

@@ -4,7 +4,7 @@
  * This example shows how to use both AerostackClient (for Auth/API calls)
  * and AerostackServer (for DB/Queue/Storage) in the same Worker.
  * 
- * Use Case: A backend service that wraps Aerostack's Auth and E-commerce APIs
+ * Use Case: A backend service that wraps Aerostack's Auth APIs
  * while also performing custom database operations.
  */
 
@@ -96,7 +96,7 @@ export default {
             }
         }
 
-        // Example 2: Custom E-commerce Flow with Analytics
+        // Example 2: Custom Checkout Flow with Analytics
         if (url.pathname === '/api/checkout' && request.method === 'POST') {
             try {
                 const { userId, items, couponCode } = await request.json();
